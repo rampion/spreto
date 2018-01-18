@@ -3,6 +3,10 @@
 module Main where
 import Options.Applicative
 import Data.Semigroup ((<>))
+import Control.Monad
+import Control.Concurrent
+import Control.Exception.Base (bracket)
+import System.IO
 
 data Position = Position
   { paragraph :: Word
@@ -69,7 +73,24 @@ options = info
   <>  header "spreto - a speed-reading tool"
   )
 
+hideCursor, showCursor :: IO ()
+hideCursor = putStr "\ESC[?25l" >> hFlush stdout
+showCursor = putStr "\ESC[?25h" >> hFlush stdout
+
 main :: IO ()
-main = do
-  r <- execParser options
-  print r
+main = bracket hideCursor (const showCursor) $ \_ -> do
+  Options{..} <- execParser options
+  ws <- words <$> readFile inputPath
+  putStrLn "───────────────────┬─────────────────────────────────────────────────"
+  putStrLn ""
+  putStr "───────────────────┴─────────────────────────────────────────────────\ESC[F"
+  -- \ESC[F - up one line
+  -- \ESC[G - move to beginning of line
+  -- \ESC[K - clear to end of line
+  hFlush stdout
+  let delay = round (60 * 1000000 / wpm)
+  forM_ ws $ \w -> do
+    putStr $ "\ESC[G\ESC[K" ++ w
+    hFlush stdout
+    threadDelay delay
+
