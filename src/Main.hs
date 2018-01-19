@@ -117,6 +117,50 @@ orp :: String -> Int
 -- In/stead o/f y/ou 
 orp w = (length w + 2) `div` 4
 
+{-
+data Action
+  = Start
+  | Quit
+  | Pause
+  | Resume
+  | Help
+  | IncreaseSpeed
+  | DecreaseSpeed
+  | PreviousWord
+  | PreviousSentence
+  | PreviousParagraph
+  | NextWord
+  | NextSentence
+  | NextParagraph
+
+action :: Mode -> Char -> Maybe Action
+action Initial _ = Just Start
+action Final _ = Nothing
+action Running ' ' = Just Pause
+action _ ' ' = Just Resume
+action _ 'h' = Just Help
+action _ '?' = Just Help
+-- \ESC[A up
+-- \ESC[B down
+-- \ESC[C right
+-- \ESC[D left
+action _ 'p' = Just PreviousParagraph
+action _ 'P' = Just NextParagraph
+action _ 's' = Just PreviousParagraph
+action _ 'S' = Just NextParagraph
+
+-- TODO: consider FRP
+data Mode
+  = Initial | Final | Running | Paused | ShowHelp
+
+data State = State
+  { speed :: Float
+  , mode :: Mode
+  , pos :: Position
+  , offset :: Word
+  }
+  -}
+
 intro :: IO ()
 intro = do
   let n = lcm (59*8) (20*3)
