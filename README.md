@@ -3,11 +3,11 @@ A **sp**eed-**re**ading **to**ol, inspired by [spritz](http://spritzinc.com/).
 `spreto` is a command-line tool. Simply call it with a text file:
 
     $ spreto examples/alice.txt
-    ───────────────────┬─────────────────────────────────────────────────
-               PRESS SPACE TO START
-    ───────────────────┴─────────────────────────────────────────────────
+    ────────────────────┬───────────────────────────────────────────────────────────
+    ████████████████████████████████████████████████████████████████████████████████
+    ────────────────────┴───────────────────────────────────────────────────────────
 
-Once unpaused, `spreto` will provide a brief countdown before displaying one
+After starting, `spreto` will provide a brief countdown before displaying one
 word at a time from the given text file, at a default rate of 250wpm.
 
 While running, you can use the keyboard to issue various commands to `spreto`:
@@ -27,9 +27,9 @@ While running, you can use the keyboard to issue various commands to `spreto`:
 Pausing will display the context of the current word, allong with the wpm and
 the position (in time, words, sentences, and paragraphs).
 
-    ───────────────────┬─────────────────────────────────────────────────
-    …mphantly.  Alice did not quite know what to say to this: so she hel…
-    ───────────────────┴─────────────────────────────────────────────────
+    ────────────────────┬───────────────────────────────────────────────────────────
+    …umphantly.  Alice did not quite know what to say to this: so she helped hersel…
+    ────────────────────┴───────────────────────────────────────────────────────────
         250wpm          51%           1:00:17/1:57:51          403.0.1
      403/881 paragraphs       1104/2290 sentences       15073/29465 words
 

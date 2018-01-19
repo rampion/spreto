@@ -41,8 +41,8 @@ instance Read Position where
 
 data Options = Options
   { wpm :: Float
-  , position :: Position
-  , inputPath :: String
+  , start :: Position
+  , path :: String
   }
   deriving Show
 
@@ -117,23 +117,43 @@ orp :: String -> Int
 -- In/stead o/f y/ou 
 orp w = (length w + 2) `div` 4
 
+intro :: IO ()
+intro = do
+  let n = lcm (59*8) (20*3)
+      runtimeInMicroseconds = 3000000
+      microsecondsPerBar = runtimeInMicroseconds `div` n
+      lefts  = "" : map return "▏▎▍▌▋▊▉" 
+      rights = "" : map return "▕▐"
+  forM_ [n,n-1..0] $ \i -> do
+    let (rfull,rpart) = (20 * i) `quotRem` n
+        (lfull,lpart) = (59 * i) `quotRem` n
+        full = rfull + lfull + 1
+        prefix = rights !! quot (3 * rpart) n
+        suffix = lefts  !! quot (8 * lpart) n
+        indent = 20 - rfull - if null prefix then 0 else 1
+    putStrLn $ concat
+      -- \ESC[<N>C - move cursor N columns right
+      [ "\ESC[F\ESC[K\ESC[", show indent, "C"
+      , prefix, replicate full '█', suffix
+      ]
+    threadDelay microsecondsPerBar
+
 main :: IO ()
 main = bracket hideCursor (const showCursor) $ \_ -> do
   Options{..} <- execParser options
-  ws <- words <$> readFile inputPath
-  putStrLn "───────────────────┬─────────────────────────────────────────────────"
+  ws <- words <$> readFile path
+  putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
   putStrLn ""
   -- \ESC[F - move cursor to beginning of previous line
-  putStr   "───────────────────┴─────────────────────────────────────────────────\ESC[F"
-  hFlush stdout
+  putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
+  intro
   let delay = round (60 * 1000000 / wpm)
   forM_ ws $ \w -> do
     let n = orp w
     let ~(xs,y:ys) = splitAt n w
-    -- \ESC[G - move to beginning of line
     -- \ESC[K - clear to end of line
     -- \ESC[31m - change foreground color to red
     -- \ESC[m - reset foreground color
-    putStr $ "\ESC[G\ESC[K" ++ replicate (19 - n) ' ' ++ xs ++ "\ESC[31m" ++ [y] ++ "\ESC[m" ++ ys
+    putStrLn $ "\ESC[F\ESC[K" ++ replicate (20 - n) ' ' ++ xs ++ "\ESC[31m" ++ [y] ++ "\ESC[m" ++ ys
     hFlush stdout
     threadDelay delay
