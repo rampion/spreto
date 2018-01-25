@@ -8,7 +8,7 @@ build:
 	cabal build
 
 test:
-	cabal test
+	cabal test --show-details=always
 
 run:
 	cabal run spreto -- examples/alice.txt

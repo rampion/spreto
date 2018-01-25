@@ -1,16 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 module TextIndex
-{-
   ( TextIndex(..)
   , textIndex
   , Range
-  , ParaIndex
   , SentenceIndex
   , WordIndex
-  , CharacterIndex
   )
-  -}
 where
 
 import Prelude hiding (words)
@@ -22,96 +18,92 @@ import qualified Data.Vector as Vector
 
 -- $setup
 -- >>> import Text.Show.Pretty (pPrint)
--- >>> :set -interactive-print pPrint -XOverloadedStrings -Wno-missing-fields
+-- >>> :set -interactive-print pPrint -XOverloadedStrings
 
 type Range i = (i,i)
-type ParaIndex = Int
 type SentenceIndex = Int
 type WordIndex = Int
-type CharacterIndex = Int
 
 data TextIndex = TextIndex
   { -- | each paragraph is a half-open range of sentences
-    paragraphs  :: (Vector (Range SentenceIndex))
+    paragraphs  :: !(Vector (Range SentenceIndex))
   , -- | each sentence is a half-open range of words
-    sentences   :: (Vector (Range WordIndex))
-  , -- | each word is a half-open range of characters
-    words       :: (Vector (Range CharacterIndex))
-  , -- | the source material
-    characters  :: Text
+    sentences   :: !(Vector (Range WordIndex))
+  , words       :: !(Vector Text)
   }
   deriving Show
 
 data WordToken
   = MultipleNewlines
   | SentenceBreak
-  | Word (Range CharacterIndex)
+  | Word Text
   deriving (Show, Eq)
 
 -- |
 -- Words are whitespace delimited.
 --
 --    >>> findWordTokens "Hello there"
---    [ Word ( 0 , 5 ) , Word ( 6 , 11 ) ]
+--    [ Word "Hello" , Word "there" ]
 --
 -- Leading and trailing spaces are ignored.
 --
 --    >>> findWordTokens "   Hello there   "
---    [ Word ( 3 , 8 ) , Word ( 9 , 14 ) ]
+--    [ Word "Hello" , Word "there" ]
 --
 --  Words can contain arbitrary symbols.
 --
 --    >>> findWordTokens "&#$@* shan't"
---    [ Word ( 0 , 5 ) , Word ( 6 , 12 ) ]
+--    [ Word "&#$@*" , Word "shan't" ]
 --
 -- Periods, question marks, and exclamation points introduce
 -- sentence breaks.
 --
 --    >>> findWordTokens "Hello. There."
---    [ Word ( 0 , 6 )
---    , SentenceBreak
---    , Word ( 7 , 13 )
---    , SentenceBreak
---    ]
+--    [ Word "Hello." , SentenceBreak , Word "There." , SentenceBreak ]
 --
 -- Unless there is something other than a quote between
 -- them and the end of the word.
 --
 --    >>> findWordTokens "'Where is home?'\n127.0.0.1"
---    [ Word ( 0 , 6 )
---    , Word ( 7 , 9 )
---    , Word ( 10 , 16 )
+--    [ Word "'Where"
+--    , Word "is"
+--    , Word "home?'"
 --    , SentenceBreak
---    , Word ( 17 , 26 )
+--    , Word "127.0.0.1"
 --    ]
 --
 -- Two or more consecutive newlines also get a token.
 --
 --    >>> findWordTokens "\n\n\nHello\n\nthere\n\n\n"
 --    [ MultipleNewlines
---    , Word ( 3 , 8 )
+--    , Word "Hello"
 --    , MultipleNewlines
---    , Word ( 10 , 15 )
+--    , Word "there"
 --    , MultipleNewlines
 --    ]
 --
 -- Whitespace is ignored when counting newlines.
 --
 --    >>> findWordTokens "Hello   \n\t\r\t  \n   there"
---    [ Word ( 0 , 5 ) , MultipleNewlines , Word ( 18 , 23 ) ]
+--    [ Word "Hello" , MultipleNewlines , Word "there" ]
 findWordTokens :: Text -> [WordToken]
-findWordTokens = findWordStart 0 0 . Text.unpack where
+findWordTokens = findWordStart  where
 
-  findWordStart _ n []    = [ MultipleNewlines | n >= 2 ]
-  findWordStart i n (ch:ct)
-    | isSpace ch          = findWordStart (i + 1) (n + fromEnum (ch == '\n')) ct
-    | otherwise           = [ MultipleNewlines | n >= 2 ] ++ findWordEnd i (i + 1) False ct
+  findWordStart text 
+    | Text.null text    = []
+    | numNewlines >= 2  = MultipleNewlines : findWordEnd next
+    | otherwise         =                    findWordEnd next
+    where (spaces, next) = Text.span isSpace text
+          numNewlines = Text.length $ Text.filter (=='\n') spaces
 
-  findWordEnd i j b []    = Word (i, j) : [ SentenceBreak | b ]
-  findWordEnd i j b (ch:ct)
-    | isSpace ch          = Word (i, j) : [ SentenceBreak | b ] ++ findWordStart (j + 1) (fromEnum $ ch == '\n') ct
-    | otherwise           = findWordEnd i (j + 1) (isTerminal ch || (b && isQuote ch)) ct
-
+  findWordEnd text
+    | Text.null text  = []
+    | endOfSentence   = Word word : SentenceBreak : findWordStart next
+    | otherwise       = Word word :                 findWordStart next
+    where (word, next) = Text.break isSpace text
+          endOfSentence = maybe False (isTerminal . snd) . Text.unsnoc $ Text.dropWhileEnd isQuote word
+          
+  
 isTerminal :: Char -> Bool
 isTerminal ch = ch `elem` (".!?" :: String)
 
@@ -126,22 +118,22 @@ data SentenceToken
 -- |
 -- Sentences are delimited by `SentenceBreak` tokens.
 --
---    >>> findSentenceTokens [Word (0,1), Word (2,3), Word (4,5)]
+--    >>> findSentenceTokens [Word "abernathy", Word "ate", Word "heartily"]
 --    [ Sentence ( 0 , 3 ) ]
---    >>> findSentenceTokens [Word (0,1), Word (2,3), SentenceBreak, Word (4,5)]
+--    >>> findSentenceTokens [Word "Frogs", Word "hop", SentenceBreak, Word "Hi"]
 --    [ Sentence ( 0 , 2 ) , Sentence ( 2 , 3 ) ]
 --
 --  Leading, trailing, or consecutive `SentenceBreak` tokens do not create
 --  empty sentences.
 --
---    >>> findSentenceTokens [SentenceBreak, Word (0,1), SentenceBreak]
+--    >>> findSentenceTokens [SentenceBreak, Word "Whee!", SentenceBreak]
 --    [ Sentence ( 0 , 1 ) ]
---    >>> findSentenceTokens [Word (0,1), SentenceBreak, SentenceBreak, SentenceBreak, Word (4,5)]
+--    >>> findSentenceTokens [Word "Hello", SentenceBreak, SentenceBreak, SentenceBreak, Word "there"]
 --    [ Sentence ( 0 , 1 ) , Sentence ( 1 , 2 ) ]
 --
 -- `MultipleNewlines` tokens also delimit sentence, but are preserved as paragraph breaks.
 --
---    >>> findSentenceTokens [Word (0,1), Word (2,3), MultipleNewlines, Word (4,5)]
+--    >>> findSentenceTokens [Word "Elbow", Word "macaroni", MultipleNewlines, Word "diesel"]
 --    [ Sentence ( 0 , 2 ) , ParagraphBreak , Sentence ( 2 , 3 ) ]
 findSentenceTokens :: [WordToken] -> [SentenceToken]
 findSentenceTokens = findSentenceStart 0 where
@@ -193,8 +185,7 @@ findParagraphs = findParagraphStart 0 where
 --    TextIndex
 --      { paragraphs = [ ( 0 , 1 ) ]
 --      , sentences = [ ( 0 , 1 ) ]
---      , words = [ ( 0 , 5 ) ]
---      , characters = "Hello"
+--      , words = [ "Hello" ]
 --      }
 --
 -- Words are whitespace delimited and may contain arbitrary symbols.
@@ -203,7 +194,7 @@ findParagraphs = findParagraphStart 0 where
 --    TextIndex
 --      { paragraphs = [ ( 0 , 1 ) ]
 --      , sentences = [ ( 0 , 4 ) ]
---      , words = [ ( 0 , 6 ) , ( 7 , 10 ) , ( 11 , 15 ) , ( 16 , 18 ) ]
+--      , words = [ "*Wow*," , "I'm" , "like" , ":)" ]
 --    ...
 --      }
 --

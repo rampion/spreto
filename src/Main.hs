@@ -15,6 +15,10 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Data.Vector as Vector
 
+-- $setup
+-- >>> import Text.Show.Pretty (pPrint)
+-- >>> :set -interactive-print pPrint -XOverloadedStrings
+
 {-
   -- sync via MVar?
 data State
@@ -129,7 +133,7 @@ showCursor = putStr "\ESC[?25h" >> hFlush stdout
 -- 2
 -- >>> orp "technology"
 -- 3
-orp :: Range CharacterIndex -> Int
+orp :: Text -> Int
 -- XXX: Expect to spend a lot of time tweaking this
 --
 -- There examples seem mostly word-length based, but it
@@ -142,7 +146,7 @@ orp :: Range CharacterIndex -> Int
 -- R/ight n/ow y/ou a/re u/sing o/ur inn/ovative re/ading tec/hnology 
 -- E/ach w/ord i/s de/livered t/o y/our e/yes i/n t/he pe/rfect po/sition 
 -- In/stead o/f y/ou 
-orp (lo,hi) = (hi - lo + 2) `div` 4
+orp w = (Text.length w + 2) `div` 4
 
 intro :: IO ()
 intro = do
@@ -179,8 +183,9 @@ main = do
     putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
     intro
     let delay = round (60 * 1000000 / wpm)
-    Vector.forM_ words $ \word@(lo,hi) -> do
+    Vector.forM_ words $ \word -> do
       let n = orp word
+      let (pre,Just (c, suf)) = Text.uncons <$> Text.splitAt n word
       Text.putStrLn $ Text.concat
         [ "\ESC[F"
         -- \ESC[K - clear to end of line
@@ -188,11 +193,11 @@ main = do
         -- \ESC[C - move cursor right
         -- to align ORP character with reticule
         , "\ESC[", Text.pack (show (20 - n)), "C"
-        , characters # (lo, lo + n)
+        , pre
         -- \ESC[31m - highlight ORP character in red
         , "\ESC[31m"
-        , characters # (lo + n, lo + n + 1)
+        , Text.singleton c
         , "\ESC[m"
-        , characters # (lo + n + 1, hi)
+        , suf
         ]
       threadDelay delay

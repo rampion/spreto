@@ -38,16 +38,6 @@ executable spreto
   if flag(development)
     ghc-options: -O2 -Wall -Wextra -Werror -threaded
 
-executable ProfTextIndex
-  main-is: ProfTextIndex.hs
-  other-modules: TextIndex
-  build-depends: base >=4.10 && <4.11
-               , text >= 1.2.2.2
-               , vector >= 0.12.0.1
-  hs-source-dirs:      src
-  default-language:    Haskell2010
-  ghc-options: -O2 -fprof-auto -rtsopts -Wall -Wextra -Werror -threaded
-
 test-suite doctests
   type: exitcode-stdio-1.0
   main-is: doctests.hs
