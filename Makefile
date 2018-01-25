@@ -11,7 +11,7 @@ test:
 	cabal test
 
 run:
-	cabal run examples/alice.txt
+	cabal run spreto -- examples/alice.txt
 
 README.html: README.md
 	pandoc -f markdown_github -i $< -o $@ --css pandoc.css -s

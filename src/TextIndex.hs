@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 module TextIndex
+{-
   ( TextIndex(..)
   , textIndex
   , Range
@@ -8,7 +9,9 @@ module TextIndex
   , SentenceIndex
   , WordIndex
   , CharacterIndex
-  ) where
+  )
+  -}
+where
 
 import Prelude hiding (words)
 import Data.Char (isSpace)
@@ -97,23 +100,17 @@ data WordToken
 --    >>> findWordTokens "Hello   \n\t\r\t  \n   there"
 --    [ Word ( 0 , 5 ) , MultipleNewlines , Word ( 18 , 23 ) ]
 findWordTokens :: Text -> [WordToken]
-findWordTokens characters = findWordStart 0 0 where
+findWordTokens = findWordStart 0 0 . Text.unpack where
 
-  findWordStart i n
-    | i == numCharacters  = ts
-    | isSpace ch          = findWordStart (i + 1) $ n + fromEnum (ch == '\n')
-    | otherwise           = ts ++ findWordEnd i (i + 1) False
-    where ch = characters `Text.index` i
-          ts = [ MultipleNewlines | n >= 2 ]
+  findWordStart _ n []    = [ MultipleNewlines | n >= 2 ]
+  findWordStart i n (ch:ct)
+    | isSpace ch          = findWordStart (i + 1) (n + fromEnum (ch == '\n')) ct
+    | otherwise           = [ MultipleNewlines | n >= 2 ] ++ findWordEnd i (i + 1) False ct
 
-  findWordEnd i j b
-    | j == numCharacters  = ts
-    | isSpace ch          = ts ++ findWordStart (j + 1) (fromEnum $ ch == '\n')
-    | otherwise           = findWordEnd i (j + 1) (isTerminal ch || (b && isQuote ch))
-    where ch = characters `Text.index` j
-          ts = Word (i, j) : [ SentenceBreak | b ]
-
-  numCharacters = Text.length characters
+  findWordEnd i j b []    = Word (i, j) : [ SentenceBreak | b ]
+  findWordEnd i j b (ch:ct)
+    | isSpace ch          = Word (i, j) : [ SentenceBreak | b ] ++ findWordStart (j + 1) (fromEnum $ ch == '\n') ct
+    | otherwise           = findWordEnd i (j + 1) (isTerminal ch || (b && isQuote ch)) ct
 
 isTerminal :: Char -> Bool
 isTerminal ch = ch `elem` (".!?" :: String)

@@ -171,14 +171,7 @@ t # (lo, hi) = Text.take (hi - lo) $ Text.drop lo t
 main :: IO ()
 main = do
   Options{..} <- execParser options
-  putStrLn $ "Loading " ++ path ++ "..." 
-  text <- Text.readFile path
-  putStrLn $ "Indexing " ++ path ++ "..." 
-  let TextIndex{..} = textIndex text
-  putStrLn $ unwords [ show $ Text.length characters, "characters" ]
-  putStrLn $ unwords [ show $ Vector.length words, "words" ]
-  putStrLn $ unwords [ show $ Vector.length sentences, "sentences" ]
-  putStrLn $ unwords [ show $ Vector.length paragraphs, "paragraphs" ]
+  TextIndex{..} <- textIndex <$> Text.readFile path
   bracket hideCursor (const showCursor) $ \_ -> do
     putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
     putStrLn ""
