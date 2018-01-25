@@ -34,8 +34,9 @@ executable spreto
                , vector >= 0.12.0.1
   hs-source-dirs:      src
   default-language:    Haskell2010
+  ghc-options: -O3
   if flag(development)
-    ghc-options: -Wall -Wextra -Werror
+    ghc-options: -O3 -Wall -Wextra -Werror
 
 test-suite doctests
   type: exitcode-stdio-1.0

@@ -1,17 +1,44 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE RecordWildCards #-}
 module Main where
+import Prelude hiding (words)
 import Options.Applicative
 import Data.Semigroup ((<>))
 import Control.Monad
 import Control.Concurrent
 import Control.Exception.Base (bracket)
 import System.IO
+import TextIndex
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import qualified Data.Vector as Vector
+
+{-
+  -- sync via MVar?
+data State
+  { frameTimer  :: !ThreadId
+  , lastFrame   :: !Time
+  , fps         :: !Double
+  , direction   :: !Direction
+  , mode        :: !Mode
+  , current     :: !Position
+  }
+-}
+
+data Mode 
+  = Starting
+  | Reading
+  | Paused { withHelp :: !Bool }
+  | Unpausing
+  | Done
+
 
 data Position = Position
-  { paragraph :: Word
-  , sentence :: Word
-  , word :: Word
+  { paragraph :: !Word
+  , sentence :: !Word
+  , word :: !Word
   }
 
 -- |
@@ -102,7 +129,7 @@ showCursor = putStr "\ESC[?25h" >> hFlush stdout
 -- 2
 -- >>> orp "technology"
 -- 3
-orp :: String -> Int
+orp :: Range CharacterIndex -> Int
 -- XXX: Expect to spend a lot of time tweaking this
 --
 -- There examples seem mostly word-length based, but it
@@ -115,7 +142,7 @@ orp :: String -> Int
 -- R/ight n/ow y/ou a/re u/sing o/ur inn/ovative re/ading tec/hnology 
 -- E/ach w/ord i/s de/livered t/o y/our e/yes i/n t/he pe/rfect po/sition 
 -- In/stead o/f y/ou 
-orp w = (length w + 2) `div` 4
+orp (lo,hi) = (hi - lo + 2) `div` 4
 
 intro :: IO ()
 intro = do
@@ -138,22 +165,41 @@ intro = do
       ]
     threadDelay microsecondsPerBar
 
+(#) :: Text -> (Int, Int) -> Text
+t # (lo, hi) = Text.take (hi - lo) $ Text.drop lo t
+
 main :: IO ()
-main = bracket hideCursor (const showCursor) $ \_ -> do
+main = do
   Options{..} <- execParser options
-  ws <- words <$> readFile path
-  putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
-  putStrLn ""
-  -- \ESC[F - move cursor to beginning of previous line
-  putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
-  intro
-  let delay = round (60 * 1000000 / wpm)
-  forM_ ws $ \w -> do
-    let n = orp w
-    let ~(xs,y:ys) = splitAt n w
-    -- \ESC[K - clear to end of line
-    -- \ESC[31m - change foreground color to red
-    -- \ESC[m - reset foreground color
-    putStrLn $ "\ESC[F\ESC[K" ++ replicate (20 - n) ' ' ++ xs ++ "\ESC[31m" ++ [y] ++ "\ESC[m" ++ ys
-    hFlush stdout
-    threadDelay delay
+  putStrLn $ "Loading " ++ path ++ "..." 
+  text <- Text.readFile path
+  putStrLn $ "Indexing " ++ path ++ "..." 
+  let TextIndex{..} = textIndex text
+  putStrLn $ unwords [ show $ Text.length characters, "characters" ]
+  putStrLn $ unwords [ show $ Vector.length words, "words" ]
+  putStrLn $ unwords [ show $ Vector.length sentences, "sentences" ]
+  putStrLn $ unwords [ show $ Vector.length paragraphs, "paragraphs" ]
+  bracket hideCursor (const showCursor) $ \_ -> do
+    putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
+    putStrLn ""
+    -- \ESC[F - move cursor to beginning of previous line
+    putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
+    intro
+    let delay = round (60 * 1000000 / wpm)
+    Vector.forM_ words $ \word@(lo,hi) -> do
+      let n = orp word
+      Text.putStrLn $ Text.concat
+        [ "\ESC[F"
+        -- \ESC[K - clear to end of line
+        , "\ESC[K"
+        -- \ESC[C - move cursor right
+        -- to align ORP character with reticule
+        , "\ESC[", Text.pack (show (20 - n)), "C"
+        , characters # (lo, lo + n)
+        -- \ESC[31m - highlight ORP character in red
+        , "\ESC[31m"
+        , characters # (lo + n, lo + n + 1)
+        , "\ESC[m"
+        , characters # (lo + n + 1, hi)
+        ]
+      threadDelay delay

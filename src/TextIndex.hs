@@ -29,13 +29,13 @@ type CharacterIndex = Int
 
 data TextIndex = TextIndex
   { -- | each paragraph is a half-open range of sentences
-    paragraphs  :: !(Vector (Range SentenceIndex))
+    paragraphs  :: (Vector (Range SentenceIndex))
   , -- | each sentence is a half-open range of words
-    sentences   :: !(Vector (Range WordIndex))
+    sentences   :: (Vector (Range WordIndex))
   , -- | each word is a half-open range of characters
-    words       :: !(Vector (Range CharacterIndex))
+    words       :: (Vector (Range CharacterIndex))
   , -- | the source material
-    characters  :: !Text
+    characters  :: Text
   }
   deriving Show
 
