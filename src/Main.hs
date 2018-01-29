@@ -2,19 +2,24 @@
 {-# LANGUAGE RecordWildCards #-}
 module Main where
 import Prelude hiding (words)
-import Options.Applicative
-import Data.Semigroup ((<>))
-import Control.Monad
-import Control.Concurrent
+
+import Control.Monad (forM_)
+import Control.Concurrent (threadDelay)
 import Control.Exception.Base (bracket)
-import System.IO
-import TextIndex
+import Data.Semigroup ((<>))
+import System.IO (hFlush, stdout)
+
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Data.Vector as Vector
+import Options.Applicative 
+  ( ParserInfo, info, option, argument, auto, str, long, help, showDefault
+  , value, metavar, helper, fullDesc, progDesc, header, execParser, (<**>)
+  )
 
-import Position
+import TextIndex (TextIndex(..), textIndex)
+import Position (Position(..))
 
 -- $setup
 -- >>> import Text.Show.Pretty (pPrint)
