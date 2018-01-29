@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE RecordWildCards #-}
 module Main where
 import Prelude hiding (words)
@@ -14,6 +13,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Data.Vector as Vector
+
+import Position
 
 -- $setup
 -- >>> import Text.Show.Pretty (pPrint)
@@ -38,37 +39,6 @@ data Mode
   | Unpausing
   | Done
 
-
-data Position = Position
-  { paragraph :: !Word
-  , sentence :: !Word
-  , word :: !Word
-  }
-
--- |
--- >>> Position 409 0 1
--- 409.0.1
-instance Show Position where
-  showsPrec _ Position{..}
-    = shows paragraph . showString "." . shows sentence . showString "." . shows word
-
-
--- |
--- >>> paragraph $ read "409.0.1"
--- 409
--- >>> sentence $ read "409.0.1"
--- 0
--- >>> word $ read "409.0.1"
--- 1
-instance Read Position where
-  readsPrec _ = go where
-    go ( splitDot -> (reads -> [(paragraph, "")]
-       , splitDot -> (reads -> [(sentence, "")]
-       ,              reads -> [(word, "")])))
-      = [(Position{..}, "")]
-    go _ = []
-
-    splitDot = fmap tail <$> break ('.'==)
 
 data Options = Options
   { wpm :: Float

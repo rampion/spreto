@@ -27,16 +27,17 @@ flag Development
 executable spreto
   main-is:             Main.hs
   other-modules:       TextIndex
+                     , Position
   -- other-extensions:    
   build-depends: base >=4.10 && <4.11
                , optparse-applicative >= 0.14.0.0
-               , text >= 1.2.2.2
+               , text >= 1.2.3.0
                , vector >= 0.12.0.1
   hs-source-dirs:      src
   default-language:    Haskell2010
-  ghc-options: -O2
+  ghc-options: -O2 -threaded
   if flag(development)
-    ghc-options: -O2 -Wall -Wextra -Werror -threaded
+    ghc-options: -O2 -threaded -Wall -Wextra -Werror
 
 test-suite doctests
   type: exitcode-stdio-1.0
