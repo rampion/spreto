@@ -28,6 +28,7 @@ executable spreto
   main-is:             Main.hs
   other-modules:       TextIndex
                      , Position
+                     , Cursor
   -- other-extensions:    
   build-depends: base >=4.10 && <4.11
                , optparse-applicative >= 0.14.0.0
