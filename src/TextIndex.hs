@@ -21,8 +21,8 @@ import qualified Data.Vector as Vector
 -- >>> :set -interactive-print pPrint -XOverloadedStrings
 
 type Range i = (i,i)
-type SentenceIndex = Int
-type WordIndex = Int
+type SentenceIndex = Word
+type WordIndex = Word
 
 data TextIndex = TextIndex
   { -- | each paragraph is a half-open range of sentences

@@ -1,24 +1,17 @@
 module Heredoc where
+import Data.List (intercalate)
+import Data.Char (isUpper)
 
-getUntil :: String -> IO [String]
-getUntil stop = do
-  line <- getLine
-  if line == stop
-      then return []
-      else (line:) <$> getUntil stop
+whileM :: Monad m => (a -> Bool) -> m a -> m [a]
+whileM p m = m >>= \a -> case p a of
+  True  -> (a:) <$> whileM p m
+  False -> return []
 
--- 
--- >>> :def heredoc \(Prelude.words -> [var, stop]) -> heredoc var stop
--- :def heredoc \(words -> [var, stop]) -> heredoc var stop
---
--- >>> :{
--- ... heredoc "x" "EOF"
--- ... hi
--- ... EOF
--- ... :}
--- "let x = \"hi\n\""
---
-heredoc var stop = do
-  text <- unlines <$> getUntil stop
-  return $ unwords ["let", var, "=", show text]
-
+heredocCmd :: String -> IO String
+heredocCmd ('<':'<':cs) = case span isUpper cs of 
+  ([], _) -> ('<':) <$> heredocCmd ('<':cs)
+  (n, ct) -> do
+    t <- intercalate "\n" <$> whileM (/= n) getLine
+    (show t ++) <$> heredocCmd ct
+heredocCmd (c:cs) = (c:) <$> heredocCmd cs
+heredocCmd [] = return []
