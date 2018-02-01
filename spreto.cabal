@@ -26,7 +26,7 @@ flag Development
 
 executable spreto
   main-is:             Main.hs
-  other-modules:       TextIndex
+  other-modules:       Document
                      , Position
                      , Cursor
   -- other-extensions:    

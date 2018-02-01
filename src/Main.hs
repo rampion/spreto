@@ -18,7 +18,7 @@ import Options.Applicative
   , value, metavar, helper, fullDesc, progDesc, header, execParser, (<**>)
   )
 
-import TextIndex (TextIndex(..), textIndex)
+import Document
 import Position (Position(..))
 
 -- $setup
@@ -150,7 +150,7 @@ t # (lo, hi) = Text.take (hi - lo) $ Text.drop lo t
 main :: IO ()
 main = do
   Options{..} <- execParser options
-  TextIndex{..} <- textIndex <$> Text.readFile path
+  paragraphs <- parseDocument <$> Text.readFile path
   bracket hideCursor (const showCursor) $ \_ -> do
     putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
     putStrLn ""
@@ -158,21 +158,23 @@ main = do
     putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
     intro
     let delay = round (60 * 1000000 / wpm)
-    Vector.forM_ words $ \word -> do
-      let n = orp word
-      let (pre,Just (c, suf)) = Text.uncons <$> Text.splitAt n word
-      Text.putStrLn $ Text.concat
-        [ "\ESC[F"
-        -- \ESC[K - clear to end of line
-        , "\ESC[K"
-        -- \ESC[C - move cursor right
-        -- to align ORP character with reticule
-        , "\ESC[", Text.pack (show (20 - n)), "C"
-        , pre
-        -- \ESC[31m - highlight ORP character in red
-        , "\ESC[31m"
-        , Text.singleton c
-        , "\ESC[m"
-        , suf
-        ]
-      threadDelay delay
+    Vector.forM_ paragraphs $ \sentences ->
+      Vector.forM_ sentences $ \words ->
+        Vector.forM_ words $ \word -> do
+          let n = orp word
+          let (pre,Just (c, suf)) = Text.uncons <$> Text.splitAt n word
+          Text.putStrLn $ Text.concat
+            [ "\ESC[F"
+            -- \ESC[K - clear to end of line
+            , "\ESC[K"
+            -- \ESC[C - move cursor right
+            -- to align ORP character with reticule
+            , "\ESC[", Text.pack (show (20 - n)), "C"
+            , pre
+            -- \ESC[31m - highlight ORP character in red
+            , "\ESC[31m"
+            , Text.singleton c
+            , "\ESC[m"
+            , suf
+            ]
+          threadDelay delay
