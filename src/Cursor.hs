@@ -1,12 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 module Cursor 
+{-
   ( Cursor(), cursor
   , currentWord, currentPosition
   , nextWord, previousWord
   , nextSentence, previousSentence
   , nextParagraph, previousParagraph
   )
+  -}
   where
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -17,8 +19,8 @@ import Position
 import TextIndex
 
 data Cursor = Cursor
-  { ix :: TextIndex
-  , currentPosition :: Position
+  { document :: Document
+  , position :: Position
   }
 
 -- $setup
@@ -64,13 +66,10 @@ v ! i = v Vector.! fromIntegral i
 -- >>> lastPosition . Cursor oz $ Position 1 2 3
 -- 3.2.3
 lastPosition :: Cursor -> Position
-lastPosition (Cursor TextIndex{..} _) = Position{..} where
-  (minParagraph, maxParagraph) = (0, fromIntegral $ Vector.length paragraphs)
-  (minSentence, maxSentence) = paragraphs ! (maxParagraph - 1)
-  (minWord, maxWord) = sentences ! (maxSentence - 1)
-  paragraph = maxParagraph - minParagraph - 1
-  sentence  = maxSentence - minSentence - 1
-  word      = maxWord - minWord - 1
+lastPosition (Cursor {..}) = Position{..} where
+  paragraph = Vector.length document - 1
+  sentence = Vector.length (document ! paragraph) - 1
+  word = Vector.length (document ! paragraph ! sentence) - 1
 
 wordPercentage, sentencePercentage, paragraphPercentage :: Cursor -> Float
 wordPercentage = undefined
@@ -85,11 +84,40 @@ paragraphPercentage = undefined
 -- 1.2.3 → toward
 -- >>> cursor oz $ Position 1 4 17
 -- 3.2.3 → cellar!"
-cursor :: TextIndex -> Position -> Maybe Cursor
-cursor ix@(TextIndex{..}) Position{..} = Cursor ix <$> do
-  let numParagraphs = Vector.length paragraphs
-      numSentences = Vector.length sentences
-      numWords = Vector.length words
+cursor :: Document -> Position -> Maybe Cursor
+cursor document = \Position{..} -> Cursor paragraphs <$> checkP paragraph sentence word where
+  checkP p s w
+    | p < 0 || maxP <= p = Nothing
+    | otherwise          = checkS p s w
+    where maxP = Vector.length document
+
+  checkS p s w
+    | s < 0     = checkP (p - 1) (s + maxS') w
+    | s >= maxS = checkP (p + 1) (s - maxS) w
+    | otherwise = checkW p s w
+    where maxS = Vector.length (document ! p)
+          maxS' = Vector.length (document ! (p-1))
+
+
+  search p s w
+    | p < 0 || maxP <= p        = Nothing
+    | s < 0 && 1 <= p           = search (p - 1) (s + maxS') w
+    | s >= maxS && p + 1 < maxP = search (p + 1) (s - maxS) w
+    | w < 0 && 1 <= s           = search p (s - 1) (w + maxW)
+    | w < 0 && 0 == s           = search (p - 1) (
+    | 
+    where maxS    = Vector.length (document ! p)
+          maxS'   = Vector.length (document ! (p - 1))
+          maxW    = Vector.length (document ! p ! s)
+          maxW'   = Vector.length (document ! p ! (s - 1))
+          maxW''  = Vector.length (document ! (p - 1) ! (maxS' - 1))
+  guard $ paragraph < numParagraphs
+  guard $ 
+  
+
+
+
+
 
       absSentence = sentence + fst (paragraphs ! paragraph)
       absWord = word + fst (sentences ! absSentence)
