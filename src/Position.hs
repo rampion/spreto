@@ -4,9 +4,9 @@ module Position where
 
 -- | Offset in a given text
 data Position = Position
-  { paragraph :: Word
-  , sentence :: Word
-  , word :: Word
+  { paragraph :: Int
+  , sentence :: Int
+  , word :: Int
   }
 
 -- |
