@@ -17,21 +17,14 @@ import Position
 import Document
 
 -- $setup
--- >>> :set -XOverloadedStrings
--- >>> :{
--- oz = parseDocument $ Text.unlines
---   [ "Suddenly Uncle Henry stood up."
---   , ""
---   , "\"There's a cyclone coming, Em,\" he called to his wife. \"I'll go look"
---   , "after the stock.\" Then he ran toward the sheds where the cows and horses"
---   , "were kept."
---   , ""
---   , "Aunt Em dropped her work and came to the door. One glance told her of"
---   , "the danger close at hand."
---   , ""
---   , "\"Quick, Dorothy!\" she screamed. \"Run for the cellar!\""
---   ]
--- :}
+-- >>> import Text.Show.Pretty (pPrint)
+-- >>> import Data.Text.IO as TextIO
+-- >>> import qualified Data.Vector as Vector
+-- >>> import Text.Wrap (wrapText, defaultWrapSettings)
+-- >>> :set -interactive-print pPrint -XOverloadedStrings
+-- >>> wrapParagraph = wrapText defaultWrapSettings 80 . Text.unwords . Vector.toList . Vector.concat . Vector.toList
+-- >>> putParagraphs = TextIO.putStrLn . Text.intercalate "\n\n" . map wrapParagraph
+
 
 data Cursor = Cursor
   { getDocument :: Document
@@ -42,26 +35,75 @@ getWord :: Cursor -> Text
 getWord (Cursor d Position{..}) = d ! paragraphNum ! sentenceNum ! wordNum
 
 -- |
--- >>> Cursor oz (Position 0 0 0)
--- 0.0.0:Suddenly
--- >>> Cursor oz (Position 1 2 3)
--- 1.2.3:toward
--- >>> Cursor oz (Position 3 2 3)
--- 3.2.3:cellar!"
+-- Shows the position and word that the cursor is currently focused on.
+--
+-- >>> oz <- parseDocument <$> TextIO.readFile "examples/oz.txt"
+-- >>> putParagraphs [oz ! i | i <- [26..29]]
+-- Suddenly Uncle Henry stood up.
+-- <BLANKLINE>
+-- "There's a cyclone coming, Em," he called to his wife. "I'll go look after the
+-- stock." Then he ran toward the sheds where the cows and horses were kept.
+-- <BLANKLINE>
+-- Aunt Em dropped her work and came to the door. One glance told her of the danger
+-- close at hand.
+-- <BLANKLINE>
+-- "Quick, Dorothy!" she screamed. "Run for the cellar!"
+-- >>> Cursor oz (Position 26 0 0)
+-- 26.0.0:Suddenly
+-- >>> Cursor oz (Position 27 2 3)
+-- 27.2.3:toward
+-- >>> Cursor oz (Position 29 2 3)
+-- 29.2.3:cellar!"
 instance Show Cursor where
   showsPrec _ c 
     = shows (getPosition c)
     . showString ":"
     . showString (Text.unpack $ getWord c)
 
--- | Smart constructor for cursor
+-- | Smart constructor for 'Cursor'
 --
--- >>> cursor oz (Position 1 (-1) 0)
--- Just 0.0.0:Suddenly
--- >>> cursor oz (Position 0 0 24)
--- Just 1.2.3:toward
--- >>> cursor oz (Position 0 8 3)
--- Just 3.2.3:cellar!"
+-- >>> oz <- parseDocument <$> TextIO.readFile "examples/oz.txt"
+-- >>> putParagraphs [oz ! i | i <- [26..29]]
+-- Suddenly Uncle Henry stood up.
+-- <BLANKLINE>
+-- "There's a cyclone coming, Em," he called to his wife. "I'll go look after the
+-- stock." Then he ran toward the sheds where the cows and horses were kept.
+-- <BLANKLINE>
+-- Aunt Em dropped her work and came to the door. One glance told her of the danger
+-- close at hand.
+-- <BLANKLINE>
+-- "Quick, Dorothy!" she screamed. "Run for the cellar!"
+--
+-- Legal positions are left unchanged.
+--
+-- >>> cursor oz (Position 26 0 0)
+-- Just 26.0.0:Suddenly
+-- >>> cursor oz (Position 27 2 3)
+-- Just 27.2.3:toward
+-- >>> cursor oz (Position 29 2 3)
+-- Just 29.2.3:cellar!"
+--
+-- Addressing a word or sentence beyond the end of a sentence or paragraph
+-- moves into the next sentence or paragraph.
+--
+-- >>> cursor oz (Position 26 0 24)
+-- Just 27.2.3:toward
+-- >>> cursor oz (Position 26 8 3)
+-- Just 29.2.3:cellar!"
+--
+-- Negative addresses go backwards.
+--
+-- >>> cursor oz (Position 27 (-1) 0)
+-- Just 26.0.0:Suddenly
+--
+-- Addressing beyond the limits of the document fails.
+--
+-- >>> cursor oz (Position 0 0 (-1))
+-- Nothing
+-- >>> cursor oz (Position 1198 0 39)
+-- Just 1198.0.39:eBooks.
+-- >>> cursor oz (Position 1198 0 40)
+-- Nothing
 cursor :: Document -> Position -> Maybe Cursor
 cursor d = fmap (Cursor d) <$> \p -> do
   guard $ 0 <= paragraphNum p && paragraphNum p < numParagraphs d
@@ -108,20 +150,33 @@ data Increment
 
 -- | Try to move a cursor by a given increment
 --
--- >>> cursor oz $ Position 0 0 0
--- Just 0.0.0:Suddenly
+-- >>> oz <- parseDocument <$> TextIO.readFile "examples/oz.txt"
+-- >>> putParagraphs [oz ! i | i <- [26..29]]
+-- Suddenly Uncle Henry stood up.
+-- <BLANKLINE>
+-- "There's a cyclone coming, Em," he called to his wife. "I'll go look after the
+-- stock." Then he ran toward the sheds where the cows and horses were kept.
+-- <BLANKLINE>
+-- Aunt Em dropped her work and came to the door. One glance told her of the danger
+-- close at hand.
+-- <BLANKLINE>
+-- "Quick, Dorothy!" she screamed. "Run for the cellar!"
+-- >>> cursor oz $ Position 26 0 0
+-- Just 26.0.0:Suddenly
 -- >>> move ToNextWord =<< it
--- Just 0.0.1:Uncle
+-- Just 26.0.1:Uncle
 -- >>> move ToNextWord =<< it
--- Just 0.0.2:Henry
+-- Just 26.0.2:Henry
 -- >>> move ToNextSentence =<< it
--- Just 1.0.0:"There's
+-- Just 27.0.0:"There's
 -- >>> move ToNextSentence =<< it
--- Just 1.1.0:"I'll
+-- Just 27.1.0:"I'll
 -- >>> move ToNextParagraph =<< it
--- Just 2.0.0:Aunt
+-- Just 28.0.0:Aunt
 -- >>> move ToNextParagraph =<< it
--- Just 3.0.0:"Quick,
+-- Just 29.0.0:"Quick,
+-- >>> cursor oz (Position 1198 0 39)
+-- Just 1198.0.39:eBooks.
 -- >>> move ToNextParagraph =<< it
 -- Nothing
 move :: Increment -> Cursor -> Maybe Cursor
