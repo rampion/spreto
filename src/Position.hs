@@ -4,9 +4,9 @@ module Position where
 
 -- | Offset in a given text
 data Position = Position
-  { paragraph :: Int
-  , sentence :: Int
-  , word :: Int
+  { paragraphNum :: Int
+  , sentenceNum :: Int
+  , wordNum :: Int
   }
 
 -- |
@@ -14,20 +14,22 @@ data Position = Position
 -- 409.0.1
 instance Show Position where
   showsPrec _ Position{..}
-    = shows paragraph . showString "." . shows sentence . showString "." . shows word
+    = shows paragraphNum . showString "."
+    . shows sentenceNum . showString "."
+    . shows wordNum
 
 -- |
--- >>> paragraph $ read "409.0.1"
+-- >>> paragraphNum $ read "409.0.1"
 -- 409
--- >>> sentence $ read "409.0.1"
+-- >>> sentenceNum $ read "409.0.1"
 -- 0
--- >>> word $ read "409.0.1"
+-- >>> wordNum $ read "409.0.1"
 -- 1
 instance Read Position where
-  readsPrec _ = go where
-    go ( splitDot -> (reads -> [(paragraph, "")]
-       , splitDot -> (reads -> [(sentence, "")]
-       ,              reads -> [(word, "")])))
+  readsPrec = const go where
+    go ( splitDot -> (reads -> [(paragraphNum, "")]
+       , splitDot -> (reads -> [(sentenceNum, "")]
+       ,              reads -> [(wordNum, "")])))
       = [(Position{..}, "")]
     go _ = []
 

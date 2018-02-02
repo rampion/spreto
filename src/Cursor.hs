@@ -1,30 +1,20 @@
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 module Cursor 
-{-
   ( Cursor(), cursor
-  , currentWord, currentPosition
-  , nextWord, previousWord
-  , nextSentence, previousSentence
-  , nextParagraph, previousParagraph
+  , getDocument, getPosition, getWord
+  , Increment(..), move
   )
-  -}
   where
-import Data.Functor.Compose (Compose(..))
-import Data.Traversable (mapAccumL)
+import Control.Monad (guard, (>=>))
 
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Vector (Vector, (!))
-import qualified Data.Vector as Vector
+import Data.Vector ((!))
 
 import Position
 import Document
-
-data Cursor = Cursor
-  { document :: Document
-  , currentPosition :: Position
-  }
 
 -- $setup
 -- >>> :set -XOverloadedStrings
@@ -43,6 +33,14 @@ data Cursor = Cursor
 --   ]
 -- :}
 
+data Cursor = Cursor
+  { getDocument :: Document
+  , getPosition :: Position
+  }
+
+getWord :: Cursor -> Text
+getWord (Cursor d Position{..}) = d ! paragraphNum ! sentenceNum ! wordNum
+
 -- |
 -- >>> Cursor oz (Position 0 0 0)
 -- 0.0.0:Suddenly
@@ -52,14 +50,12 @@ data Cursor = Cursor
 -- 3.2.3:cellar!"
 instance Show Cursor where
   showsPrec _ c 
-    = shows (currentPosition c)
+    = shows (getPosition c)
     . showString ":"
-    . showString (Text.unpack $ currentWord c)
+    . showString (Text.unpack $ getWord c)
 
-currentWord :: Cursor -> Text
-currentWord Cursor{ document = document, currentPosition = Position {..}} = document ! paragraph ! sentence ! word
-
--- |
+-- | Smart constructor for cursor
+--
 -- >>> cursor oz (Position 1 (-1) 0)
 -- Just 0.0.0:Suddenly
 -- >>> cursor oz (Position 0 0 24)
@@ -67,264 +63,147 @@ currentWord Cursor{ document = document, currentPosition = Position {..}} = docu
 -- >>> cursor oz (Position 0 8 3)
 -- Just 3.2.3:cellar!"
 cursor :: Document -> Position -> Maybe Cursor
-cursor d = (Cursor d <$>) . normParagraph where
-  normParagraph p@Position{..}
-    | paragraph < minParagraph d p || maxParagraph d p < paragraph  = Nothing
-    | sentence < 0                          = normSentenceLo p >>= normWord
-    | numSentences d paragraph <= sentence  = normSentenceHi p >>= normWord
-    | otherwise                             = normWord p
+cursor d = fmap (Cursor d) <$> \p -> do
+  guard $ 0 <= paragraphNum p && paragraphNum p < numParagraphs d
 
-  normWord p@Position{..}
-    | word < 0                              = normWordLo p
-    | numWords d paragraph sentence <= word = normWordHi p
-    | otherwise                             = Just p
+  let makeLegalSentenceNum 
+        | sentenceNum p < 0 = 
+          paragraphToSentences d >=> \p ->
+          if sentenceNum p < 0 
+            then makeLegalSentenceNum p
+            else return p
+        | sentenceNumInNextParagraph d p >= 0 =
+          sentencesToParagraph d >=> \p ->
+          if sentenceNumInNextParagraph d p >= 0
+            then makeLegalSentenceNum p
+            else return p
+        | otherwise = return
 
-  normSentenceLo p = do
-    p@Position{..} <- incParagraph d p
-    if sentence < 0 then normSentenceLo p else return p
+  p <- makeLegalSentenceNum p
 
-  normSentenceHi p = do
-    p@Position{..} <- decParagraph d p
-    if numSentences d paragraph <= sentence then normSentenceHi p else return p
+  let makeLegalWordNum
+        | wordNum p < 0 =
+          sentenceToWords d >=> \p ->
+          if wordNum p < 0
+            then makeLegalWordNum p
+            else return p
+        | wordNumInNextSentence d p >= 0 =
+          wordsToSentence d >=> \p ->
+          if wordNumInNextSentence d p >= 0
+            then makeLegalWordNum p
+            else return p
+        | otherwise = return
 
-  normWordLo p = do
-    p@Positon{..} <- incSentence d p
-    if word < 0 then normWordLo p else return p
+  makeLegalWordNum p
 
-  normWordhi p = do
-    p@Position{..} <- decSentence d p
-    if numWords d paragraph sentence <= word then normWordhi p else return p
+--------------------------------------------------------------------------------
 
-incParagraph :: Document -> Position -> Maybe Position
-incParagraph d p@Postion{..}
-  | paragraph + 1 < numParagraphs d = Just p { paragraph = paragraph + 1, sentence = sentence - numSentences d paragraph }
-  | otherwise                       = Nothing
+data Increment
+  = ToNextWord
+  | ToPreviousWord
+  | ToNextSentence
+  | ToPreviousSentence
+  | ToNextParagraph
+  | ToPreviousParagraph 
 
-decParagraph :: Document -> Position -> Maybe Position
-decParagraph _ p@Position{..}
-  | 0 < paragraph = Just p { paragraph = paragraph - 1, sentence = sentence + numSentences d (paragraph - 1) }
-  | otherwise     = Nothing
-
-incSentence :: Document -> Position -> Maybe Position
-incSentence d (update -> p@Position{..})
-  | sentence + 1 < numSentences d paragraph = Just p { sentence = sentence + 1 }
-  | otherwise                               = incParagraph p
-  where update d p@Position = p { word = word - numWords d paragraph sentence }
-
-decSentence :: Document -> Position -> Maybe Position
-decSentence d p@Position{..}
-  | 0 < sentence = Just p { sentence = sentence - 1 } <&> update d
-  | otherwise    = decParagraph d p <&> update d
-  where update d p@Position{..} = p { word = word + numWords d paragraph sentence }
-
-nextWord :: Document -> Position -> Maybe Position
-nextWord d p@Position{..}
-  | word + 1 < numWords d paragraph sentence = Just p'
-  | otherwise                                = incSentence p'
-  where p' = p { word = word + 1 }
-
-prevWord :: Document -> Position -> Maybe Position
-prevWord d p@Position{..}
-  | 0 < word = Just p'
-  | otherwise = decSentence p'
-  where p' = p { word = word - 1 }
-
-nextSentence :: Document -> Position -> Maybe Position
-nextSentence d p@Position{..}
-  | sentence + 1 < numSentences d paragraph = Just p'
-  | otherwise                               = incParagraph p'
-  where p' = p { sentence = sentence + 1, word = 0 }
-
-prevSentence :: Document -> Position -> Maybe Position
-prevSentence d p@Position{..}
-  | 0 < sentence = Just p'
-  | otherwise = decParagraph p'
-  where p' = p { sentence = sentence - 1, word = 0 }
-
-nextParagraph d p@Position{..}
-  | paragraph + 1 < numParagraphs d = Just p { paragraph = paragraph + 1, sentence = 0, word = 0 }
-  | otherwise = Nothing
-
-prevParagraph d p@Position{..}
-  | 0 < paragraph = Just p { paragraph = paragraph - 1, sentence = 0, word = 0 }
-  | otherwise = Nothing
-
-
--- cursor :: Document -> Position -> Maybe (Word, Position)
-cursor document = fmap (Cursor document) . normalize where
-
-  normalize :: Position -> Maybe Position
-  normalize position@Position{..}
-    | paragraph < 0 || numParagraphs <= paragraph = Nothing
-    | sentence < 0                                = normalize position { paragraph = paragraph - 1, sentence = sentence + numSentencesPrior ! paragraph }
-    | numSentences ! paragraph <= sentence        = normalize position { paragraph = paragraph + 1, sentence = sentence - numSentences ! paragraph }
-    | word < 0                                    = normalize position { sentence = sentence - 1, word = word + numWordsPrior ! paragraph ! sentence }
-    | numWords ! paragraph ! sentence <= word     = normalize position { sentence = sentence + 1, word = word - numWords ! paragraph ! sentence }
-    | otherwise                                   = Just position
-
-  nextWord :: Position -> Maybe Position
-  nextWord position@Position{..}
-    | word + 1 < numWords ! paragraph ! sentence  = Just $ position { word = word + 1 }
-    | otherwise                                   = nextSentence position
-
-  nextSentence :: Position -> Maybe Position
-  nextSentence position@Position{..}
-    | sentences + 1 < numSentences ! paragraph    = Just $ position { sentence = sentence + 1, word = 0 }
-    -- | sentences + 1 < numSentences ! paragraph    = Just $ position { sentence = sentence + 1, word = word - numWords ! paragraph ! sentence }
-    | otherwise                                   = nextParagraph position
-
-  nextParagraph :: Position -> Maybe Position
-  nextParagraph position@Position{..}
-    | paragraphs + 1 < numParagraphs              = Just $ position { paragraph = paragraph + 1, sentence = 0, word = 0 }
-    -- | paragraphs + 1 < numParagraphs              = Just $ position { paragraph = paragraph + 1, sentence = sentence - numSentences ! paragraph }
-    | otherwise                                   = Nothing
-
-  previousWord :: Position -> Maybe Position
-  previousWord position@Position{..}
-    | word > 0        = Just $ position { word = word - 1 }
-    | otherwise       = previousSentence position <&> \position@Position{..} -> position { word = numWords ! paragraph ! sentence - 1 }
-
-  previousSentence :: Position -> Maybe Position
-  previousSentence position@Position{..}
-    | sentences > 0   = Just $ position { sentence = sentence - 1, word = 0 }
-    | otherwise       = previousParagraph position <&> \position@Position{..} -> position { sentence = numSentences ! paragraph - 1 } 
-    -- | otherwise       = previousParagraph position <&> \position@Position{..} -> position { sentence = numSentences ! paragraph - 1 } 
-
-  previousParagraph :: Position -> Maybe Position
-  previousParagraph position@Position{..}
-    | paragraphs > 0  = Just $ position { paragraph = paragraph - 1, sentence = 0, word = 0 }
-    | otherwise       = Nothing
-
-  numParagraphs = Vector.length document
-  numSentences = Vector.length <$> document
-  numWords = fmap Vector.length <$> document
-  numSentencesPrior = prior numSentences
-  numWordsPrior = getCompose . prior $ Compose numWords
-
-numParagraphs :: Document -> Int
-numParagraphs d = Vector.length d
-
-numSentences :: Document -> Int -> Int
-numSentences d p = Vector.length (d ! p)
-
-numWords :: Document -> Int -> Int -> Int
-numWords d p s = Vector.length (d ! p ! s)
-
-numSentencesPrior :: Document -> Int -> Int
-numSentencesPrior d p = numSentences d (p - 1)
-
-numWordsPrior :: Document -> Int -> Int -> Int
-numWordsPrior d p s = numWords d p (s - 1)
-
-prior :: Traversable t => t Int -> t Int
-prior = snd . mapAccumL (\a b -> (b, a)) 0
-
-
-{-
--- |
--- >>> firstPosition . Cursor oz $ Position 1 2 3
--- 0.0.0
-firstPosition :: Cursor -> Position
-firstPosition _ = Position 0 0 0
-
-(!) :: Vector a -> Word -> a
-v ! i = v Vector.! fromIntegral i
-
--- |
--- >>> lastPosition . Cursor oz $ Position 1 2 3
--- 3.2.3
-lastPosition :: Cursor -> Position
-lastPosition (Cursor {..}) = Position{..} where
-  paragraph = Vector.length document - 1
-  sentence = Vector.length (document ! paragraph) - 1
-  word = Vector.length (document ! paragraph ! sentence) - 1
-
-wordPercentage, sentencePercentage, paragraphPercentage :: Cursor -> Float
-wordPercentage = undefined
-sentencePercentage = undefined
-paragraphPercentage = undefined
-
--- | smart constructor for Cursor, normalizing positions
+-- | Try to move a cursor by a given increment
 --
 -- >>> cursor oz $ Position 0 0 0
--- 0.0.0 → Suddenly
--- >>> cursor oz $ Position 0 0 24
--- 1.2.3 → toward
--- >>> cursor oz $ Position 1 4 17
--- 3.2.3 → cellar!"
-cursor :: Document -> Position -> Maybe Cursor
-cursor document = \Position{..} -> Cursor paragraphs <$> checkP paragraph sentence word where
-  checkP p s w
-    | p < 0 || maxP <= p = Nothing
-    | otherwise          = checkS p s w
-    where maxP = Vector.length document
+-- Just 0.0.0:Suddenly
+-- >>> move ToNextWord =<< it
+-- Just 0.0.1:Uncle
+-- >>> move ToNextWord =<< it
+-- Just 0.0.2:Henry
+-- >>> move ToNextSentence =<< it
+-- Just 1.0.0:"There's
+-- >>> move ToNextSentence =<< it
+-- Just 1.1.0:"I'll
+-- >>> move ToNextParagraph =<< it
+-- Just 2.0.0:Aunt
+-- >>> move ToNextParagraph =<< it
+-- Just 3.0.0:"Quick,
+-- >>> move ToNextParagraph =<< it
+-- Nothing
+move :: Increment -> Cursor -> Maybe Cursor
+move ToNextWord (Cursor d p) = Cursor d <$>
+  let q = p { wordNum = wordNum p + 1 } in
+  (if wordNumInNextSentence d q >= 0 then wordsToSentence d else Just) q
+move ToPreviousWord (Cursor d p) = Cursor d <$>
+  let q = p { wordNum = wordNum p - 1 } in
+  (if wordNum q <= 0 then sentenceToWords d else Just) q
+move ToNextSentence (Cursor d p) = Cursor d <$>
+  let q = p { sentenceNum = sentenceNum p + 1, wordNum = 0 } in
+  (if sentenceNumInNextParagraph d q >= 0 then sentencesToParagraph d else Just) q
+move ToPreviousSentence (Cursor d p) = Cursor d <$>
+  let q = p { sentenceNum = sentenceNum p - 1, wordNum = 0 } in
+  (if sentenceNum q <= 0 then paragraphToSentences d else Just) q
+move ToNextParagraph (Cursor d p) = Cursor d <$>
+  let q = Position { paragraphNum = paragraphNum p + 1, sentenceNum = 0, wordNum = 0 } in
+  (if paragraphNum q >= numParagraphs d then const Nothing else Just) q
+move ToPreviousParagraph (Cursor d p) = Cursor d <$>
+  let q = Position { paragraphNum = paragraphNum p - 1, sentenceNum = 0, wordNum = 0 } in
+  (if paragraphNum q < 0 then const Nothing else Just) q
 
-  checkS p s w
-    | s < 0     = checkP (p - 1) (s + maxS') w
-    | s >= maxS = checkP (p + 1) (s - maxS) w
-    | otherwise = checkW p s w
-    where maxS = Vector.length (document ! p)
-          maxS' = Vector.length (document ! (p-1))
+--------------------------------------------------------------------------------
 
+-- | Exchange sentences for a paragraph
+--
+-- Given 0 <= paragraphNum, preserves legality of paragraphNum in result
+sentencesToParagraph :: Document -> Position -> Maybe Position
+sentencesToParagraph d p@Position{..} = do
+  guard $ paragraphNum + 1 < numParagraphs d 
+  return p { paragraphNum = paragraphNum + 1, sentenceNum = sentenceNumInNextParagraph d p }
 
-  search p s w
-    | p < 0 || maxP <= p        = Nothing
-    | s < 0 && 1 <= p           = search (p - 1) (s + maxS') w
-    | s >= maxS && p + 1 < maxP = search (p + 1) (s - maxS) w
-    | w < 0 && 1 <= s           = search p (s - 1) (w + maxW)
-    | w < 0 && 0 == s           = search (p - 1) (
-    | 
-    where maxS    = Vector.length (document ! p)
-          maxS'   = Vector.length (document ! (p - 1))
-          maxW    = Vector.length (document ! p ! s)
-          maxW'   = Vector.length (document ! p ! (s - 1))
-          maxW''  = Vector.length (document ! (p - 1) ! (maxS' - 1))
-  guard $ paragraph < numParagraphs
-  guard $ 
-  
+-- | Exchange a paragraph for sentences
+--
+-- Given paragraphNum < numParagraphs d, preserves legality of paragraphNum in result
+paragraphToSentences :: Document -> Position -> Maybe Position
+paragraphToSentences d p@Position{..} = do
+  guard $ 0 < paragraphNum
+  return p { paragraphNum = paragraphNum - 1, sentenceNum = sentenceNumInPreviousParagraph d p }
 
+-- | Exchange words for a sentence
+--
+-- Given 0 <= paragraphNum < numParagraphs d and 0 <= sentenceNum, 
+-- preserves legality of both in result
+wordsToSentence :: Document -> Position -> Maybe Position
+wordsToSentence d p =
+  let q = p { sentenceNum = sentenceNum p + 1, wordNum = wordNumInNextSentence d p } in
+  (if sentenceNumInNextParagraph d q >= 0 then sentencesToParagraph d else Just) q
 
+-- | Exchange a sentence for words
+--
+-- Given 0 <= paragraphNum < numParagraphs d and sentenceNum < numSentences d paragraphNum, 
+-- preserves legality of both in result
+sentenceToWords :: Document -> Position -> Maybe Position
+sentenceToWords d p =
+  let q = p { sentenceNum = sentenceNum p - 1, wordNum = wordNumInPreviousSentence d p } in
+  (if sentenceNum q < 0 then paragraphToSentences d else Just) q
 
+-- | What sentenceNum would point to the focused sentence if the cursor moved
+-- to the next paragraph.
+--
+-- Assumes paragraphNum is legal
+sentenceNumInNextParagraph :: Document -> Position -> Int
+sentenceNumInNextParagraph d Position{..} = sentenceNum - numSentences d paragraphNum
 
+-- | What sentenceNum would point to the focused sentence if the cursor moved
+-- to the previous paragraph.
+--
+-- Assumes paragraphNum is legal
+sentenceNumInPreviousParagraph :: Document -> Position -> Int
+sentenceNumInPreviousParagraph d Position{..} = sentenceNum + numSentences d (paragraphNum - 1)
 
-      absSentence = sentence + fst (paragraphs ! paragraph)
-      absWord = word + fst (sentences ! absSentence)
+-- | What wordNum would point the focused word if the cursor moved to the next
+-- paragraph.
+--
+-- Assumes paragraphNum and sentenceNum are legal
+wordNumInNextSentence :: Document -> Position -> Int
+wordNumInNextSentence d Position{..} = wordNum - numWords d paragraphNum sentenceNum
 
-      (word', absSentence') = findRelative absWord absSentence numSentences sentences
-      (sentence', paragraph') = findRelative absSentence' paragraph numParagraphs paragraphs
-
-      -- check if people tell the truth, fall back on binary search
-      findRelative i lo hi v 
-        | mini <= i && i < maxi = (i - mini, lo)
-        | otherwise             = findRelativeB i (lo+1) hi v
-        where (mini, maxi) = v ! lo
-
-      findRelativeB i lo hi v
-        | i < mini  = findRelativeB i lo (j-1) v
-        | maxi <= i = findRelativeB i (j+1) hi v
-        | otherwise = (i - mini, j)
-        where j = (lo + hi) `div` 2
-              (mini, maxi) = v ! j
-
-  guard $   paragraph < numParagraphs 
-        &&  absSentence < numSentences
-        &&  absWord < numWords
-
-  return $ Position paragraph' sentence' word'
-
-currentWord :: Cursor -> Text
-currentWord (Cursor TextIndex{..} Position{..}) = words ! wordNum where
-  wordNum = word + minWord
-  (minWord, _) = sentences ! sentenceNum
-  sentenceNum = sentence + minSentence
-  (minSentence, _) = paragraphs ! paragraph
-
-nextWord, previousWord, nextSentence, previousSentence, nextParagraph, previousParagraph
-  :: Cursor -> Maybe Cursor
-nextWord = undefined
-previousWord = undefined
-nextSentence = undefined
-previousSentence = undefined
-nextParagraph = undefined
-previousParagraph = undefined
--}
+-- | What wordNum would point to the focused word if the cursor moved to the
+-- previous paragraph.
+--
+-- Assumes paragraphNum and sentenceNum are legal
+wordNumInPreviousSentence :: Document -> Position -> Int
+wordNumInPreviousSentence d Position{..} = wordNum + numWords d paragraphNum (sentenceNum - 1)

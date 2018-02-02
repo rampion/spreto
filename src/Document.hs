@@ -1,7 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE RecordWildCards #-}
-module Document (Document(..), parseDocument) where
+module Document
+  ( Document(..)
+  , parseDocument
+  , numParagraphs
+  , numSentences
+  , numWords
+  ) where
 
 import Prelude hiding (Word)
 import Data.Char (isSpace)
@@ -9,7 +15,7 @@ import Data.List (unfoldr)
 
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Vector (Vector)
+import Data.Vector (Vector, (!))
 import qualified Data.Vector as Vector
 
 -- $setup
@@ -31,6 +37,17 @@ data SentenceToken
   = ParagraphBreak
   | FoundSentence Sentence 
   deriving (Show, Eq)
+
+numParagraphs :: Document -> Int
+numParagraphs d = Vector.length d
+
+-- | assumes legal paragraphNum
+numSentences :: Document -> Int -> Int
+numSentences d paragraphNum = Vector.length (d ! paragraphNum)
+
+-- | assumes legal paragraphNum and sentenceNum
+numWords :: Document -> Int -> Int -> Int
+numWords d paragraphNum sentenceNum = Vector.length (d ! paragraphNum ! sentenceNum)
 
 -- | terminal characters end sentences
 isTerminal :: Char -> Bool

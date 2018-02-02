@@ -44,7 +44,7 @@ test-suite doctests
   type: exitcode-stdio-1.0
   main-is: doctests.hs
   build-depends: base
-               , doctest >=0.11.2 && <0.12
+               , doctest >=0.13 && <0.14
                , pretty-show >= 1.6.13 && <2.0.0
   default-language: Haskell2010
   if flag(development)
