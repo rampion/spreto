@@ -2,7 +2,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE RecordWildCards #-}
 module Document
-  ( Document(..)
+  ( Document
   , parseDocument
   , numParagraphs
   , numSentences
