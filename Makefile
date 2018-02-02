@@ -23,8 +23,11 @@ dist/doc/html/spreto: src/*.hs
 	cabal haddock --executables
 	touch $@
 
-dist/doc/html/README.html: README.md
+dist/doc/html/README.html: README.md dist/doc/html/gfm.css
+	pandoc $< -o $@ --css gfm.css --standalone --from gfm --to html --metadata=title:README
+
+dist/doc/html/gfm.css: gfm.css
 	mkdir -p $(dir $@)
-	pandoc $< -o $@ --css pandoc.css --standalone --from gfm --to html --metadata=title:README
+	cp $< $@
 
 .PHONY: default all example install-dependencies build doc test
