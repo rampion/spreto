@@ -1,8 +1,15 @@
 default:
 
-all: doc build test
+all: configure install-dependencies build doc test
 
-doc: README.html
+example:
+	cabal run spreto -- examples/alice.txt
+
+configure:
+	cabal configure --enable-tests -f development
+
+install-dependencies:
+	cabal install --enable-tests --dependencies-only
 
 build:
 	cabal build
@@ -10,10 +17,14 @@ build:
 test:
 	cabal test --show-details=always
 
-run:
-	cabal run spreto -- examples/alice.txt
+doc: dist/doc/html/spreto dist/doc/html/README.html
 
-README.html: README.md
-	pandoc -f markdown_github -i $< -o $@ --css pandoc.css -s
+dist/doc/html/spreto: src/*.hs
+	cabal haddock --executables
+	touch $@
 
-.PHONY: default all doc build test
+dist/doc/html/README.html: README.md
+	mkdir -p $(dir $@)
+	pandoc $< -o $@ --css pandoc.css --standalone --from gfm --to html --metadata=title:README
+
+.PHONY: default all example install-dependencies build doc test
