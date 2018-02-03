@@ -2,9 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 module Main where
-import Prelude hiding (words)
-
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Base (bracket)
 import Data.Semigroup ((<>))
@@ -18,6 +16,7 @@ import qualified Data.Text.IO as TextIO
 import Options.Applicative 
   ( ParserInfo, info, option, argument, auto, str, long, help, showDefault
   , value, metavar, helper, fullDesc, progDesc, header, execParser, (<**>)
+  , switch
   )
 
 import Cursor
@@ -52,6 +51,7 @@ data Options = Options
   { wpm :: Float
   , start :: Position
   , path :: String
+  , skipIntro :: Bool
   }
   deriving Show
 
@@ -74,6 +74,10 @@ options = info
               <*> argument str
                   (   help "File to read from"
                   <>  metavar "PATH"
+                  )
+              <*> switch
+                  (   long "skip-intro"
+                  <>  help "Skip the introductory countdown"
                   )
   <**> helper
   )
@@ -147,9 +151,6 @@ intro = do
       ]
     threadDelay microsecondsPerBar
 
-(#) :: Text -> (Int, Int) -> Text
-t # (lo, hi) = Text.take (hi - lo) $ Text.drop lo t
-
 main :: IO ()
 main = do
   Options{..} <- execParser options
@@ -164,7 +165,7 @@ main = do
         putStrLn ""
         -- \ESC[F - move cursor to beginning of previous line
         putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
-        intro
+        when (not skipIntro) intro
         let delay = round (60 * 1000000 / wpm)
 
         flip fix here $ \loop here -> do
