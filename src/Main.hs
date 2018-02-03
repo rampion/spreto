@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 module Main where
@@ -7,17 +8,19 @@ import Control.Monad (forM_)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Base (bracket)
 import Data.Semigroup ((<>))
-import System.IO (hFlush, stdout)
+import Data.Function (fix)
+import System.Exit (exitFailure)
+import System.IO (hFlush, stdout, stderr)
 
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
-import qualified Data.Vector as Vector
+import qualified Data.Text.IO as TextIO
 import Options.Applicative 
   ( ParserInfo, info, option, argument, auto, str, long, help, showDefault
   , value, metavar, helper, fullDesc, progDesc, header, execParser, (<**>)
   )
 
+import Cursor
 import Document
 import Position (Position(..))
 
@@ -150,20 +153,25 @@ t # (lo, hi) = Text.take (hi - lo) $ Text.drop lo t
 main :: IO ()
 main = do
   Options{..} <- execParser options
-  paragraphs <- parseDocument <$> Text.readFile path
-  bracket hideCursor (const showCursor) $ \_ -> do
-    putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
-    putStrLn ""
-    -- \ESC[F - move cursor to beginning of previous line
-    putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
-    intro
-    let delay = round (60 * 1000000 / wpm)
-    Vector.forM_ paragraphs $ \sentences ->
-      Vector.forM_ sentences $ \words ->
-        Vector.forM_ words $ \word -> do
+  document <- parseDocument <$> TextIO.readFile path
+  case cursor document start of
+    Nothing -> do
+      TextIO.hPutStrLn stderr . Text.pack $ "ERROR: illegal start position " <> show start <> " in document " <> path
+      exitFailure
+    Just here -> do
+      bracket hideCursor (const showCursor) $ \_ -> do
+        putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
+        putStrLn ""
+        -- \ESC[F - move cursor to beginning of previous line
+        putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
+        intro
+        let delay = round (60 * 1000000 / wpm)
+
+        flip fix here $ \loop here -> do
+          let word = getWord here
           let n = orp word
           let (pre,Just (c, suf)) = Text.uncons <$> Text.splitAt n word
-          Text.putStrLn $ Text.concat
+          TextIO.putStrLn $ Text.concat
             [ "\ESC[F"
             -- \ESC[K - clear to end of line
             , "\ESC[K"
@@ -178,3 +186,7 @@ main = do
             , suf
             ]
           threadDelay delay
+
+          return () `maybe` loop $ move ToNextWord here 
+
+        putStrLn ""
