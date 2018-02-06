@@ -5,11 +5,14 @@ module Main where
 import Control.Monad (forM_, when)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Base (bracket)
+import Data.List (intercalate)
 import Data.Semigroup ((<>))
 import Data.Function (fix)
 import System.Exit (exitFailure)
 import System.IO (hFlush, stdout, stderr)
 
+import Data.Vector ((!), Vector)
+import qualified Data.Vector as Vector
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
@@ -18,6 +21,7 @@ import Options.Applicative
   , value, metavar, helper, fullDesc, progDesc, header, execParser, (<**>)
   , switch
   )
+import System.Clock
 
 import Cursor
 import Document
@@ -130,26 +134,109 @@ orp :: Text -> Int
 -- In/stead o/f y/ou 
 orp w = (Text.length w + 2) `div` 4
 
+{-
+data Action
+  = Start
+  | Quit
+  | Pause
+  | Resume
+  | Help
+  | IncreaseSpeed
+  | DecreaseSpeed
+  | PreviousWord
+  | PreviousSentence
+  | PreviousParagraph
+  | NextWord
+  | NextSentence
+  | NextParagraph
+
+action :: Mode -> Char -> Maybe Action
+action Initial _ = Just Start
+action Final _ = Nothing
+action Running ' ' = Just Pause
+action _ ' ' = Just Resume
+action _ 'h' = Just Help
+action _ '?' = Just Help
+-- \ESC[A up
+-- \ESC[B down
+-- \ESC[C right
+-- \ESC[D left
+action _ 'p' = Just PreviousParagraph
+action _ 'P' = Just NextParagraph
+action _ 's' = Just PreviousParagraph
+action _ 'S' = Just NextParagraph
+
+-- TODO: consider FRP
+data Mode
+  = Initial | Final | Running | Paused | ShowHelp
+
+data State = State
+  { speed :: Float
+  , mode :: Mode
+  , pos :: Position
+  , offset :: Word
+  }
+  -}
+
+reticuleColumnWidth, reticulePrefixWidth, reticuleSuffixWidth :: Int
+reticuleColumnWidth = 80
+reticulePrefixWidth = orp (Text.replicate reticuleColumnWidth "X")
+reticuleSuffixWidth = reticuleColumnWidth - 1 - reticulePrefixWidth
+
+reticule :: String
+reticule = intercalate "\n"
+  [ line '┬'
+  , ""
+  , line '┴'
+  ] where line c = replicate reticulePrefixWidth '─' ++ c : replicate reticuleSuffixWidth '─' 
+
+introDurationInMicroseconds :: Double
+introDurationInMicroseconds = 5e6
+
+introLeftEdges, introRightEdges :: Vector String
+introLeftEdges   = Vector.fromList $ "" : map return "▕▐" 
+introRightEdges  = Vector.fromList $ "" : map return "▏▎▍▌▋▊▉"
+
+timeSpecToMicroseconds :: TimeSpec -> Double
+timeSpecToMicroseconds TimeSpec{..} = 1000*1000*fromIntegral sec + fromIntegral nsec / 1000
+
 intro :: IO ()
 intro = do
-  let n = lcm (59*8) (20*3)
-      runtimeInMicroseconds = 3000000
-      microsecondsPerBar = runtimeInMicroseconds `div` n
-      lefts  = "" : map return "▏▎▍▌▋▊▉" 
-      rights = "" : map return "▕▐"
-  forM_ [n,n-1..0] $ \i -> do
-    let (rfull,rpart) = (20 * i) `quotRem` n
-        (lfull,lpart) = (59 * i) `quotRem` n
-        full = rfull + lfull + 1
-        prefix = rights !! quot (3 * rpart) n
-        suffix = lefts  !! quot (8 * lpart) n
-        indent = 20 - rfull - if null prefix then 0 else 1
-    putStrLn $ concat
-      -- \ESC[<N>C - move cursor N columns right
-      [ "\ESC[F\ESC[K\ESC[", show indent, "C"
-      , prefix, replicate full '█', suffix
+  let numLeftEdges = Vector.length introLeftEdges
+      numRightEdges = Vector.length introRightEdges
+
+      numFrames = lcm (reticulePrefixWidth * numLeftEdges)
+                      (reticuleSuffixWidth * numRightEdges)
+
+      framesPerMicrosecond = fromIntegral numFrames  / introDurationInMicroseconds
+
+  startTime <- timeSpecToMicroseconds <$> getTime Monotonic
+
+  forM_ [0..numFrames] $ \frameNum -> do
+    let framesRemaining = numFrames - frameNum
+        (leftFull, leftPartial)   = (reticulePrefixWidth * framesRemaining) `quotRem` numFrames
+        (rightFull, rightPartial) = (reticuleSuffixWidth * framesRemaining) `quotRem` numFrames
+        numFull = leftFull + 1 + rightFull
+        leftEdge  = introLeftEdges ! quot (numLeftEdges * leftPartial) numFrames
+        rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) numFrames
+        indent = reticulePrefixWidth - leftFull - length leftEdge
+
+    putStr $ concat
+      [ "\ESC[F" -- move up one line
+      , "\ESC[K" -- clear to end of line
       ]
-    threadDelay microsecondsPerBar
+    when (indent > 0) . putStr $ concat
+      [ "\ESC[", show indent, "C" ] -- move indent characters right; \ESC[0C moves 1, not 0
+    putStrLn $ concat
+      [ leftEdge, replicate numFull '█', rightEdge ]
+
+    -- smooth out timing from threadDelay so the entire animation
+    -- takes no longer than desired
+    --
+    -- probably undesirable in word presentation
+    currTime <- timeSpecToMicroseconds <$> getTime Monotonic
+    let delay = round $ startTime + (fromIntegral frameNum + 1)/framesPerMicrosecond - currTime
+    threadDelay delay
 
 main :: IO ()
 main = do
@@ -161,10 +248,8 @@ main = do
       exitFailure
     Just here -> do
       bracket hideCursor (const showCursor) $ \_ -> do
-        putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
-        putStrLn ""
-        -- \ESC[F - move cursor to beginning of previous line
-        putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
+        putStr reticule
+        putStrLn "\ESC[F" -- move cursor to beginning of previous line
         when (not skipIntro) intro
         let delay = round (60 * 1000000 / wpm)
 
