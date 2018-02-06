@@ -4,35 +4,52 @@ import System.IO
 import Control.Monad
 import Control.Concurrent
 import System.Clock
+import Data.Vector ((!))
+import qualified Data.Vector as Vector
 
 timeSpecToMicroseconds :: TimeSpec -> Double
 timeSpecToMicroseconds TimeSpec{..} = 1000*1000*fromIntegral sec + fromIntegral nsec / 1000
 
 main :: IO ()
 main = do
-  putStr "\ESC[?25l"
-  putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
-  putStrLn ""
-  putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
-  let n = lcm (59*8) (20*3)
-      lefts  = "" : map return "▏▎▍▌▋▊▉" 
-      rights = "" : map return "▕▐"
+  let leftEdges   = Vector.fromList $ "" : map return "▕▐" 
+      rightEdges  = Vector.fromList $ "" : map return "▏▎▍▌▋▊▉"
+      prefixWidth = 20
+      suffixWidth = 59
+      durationInMicroseconds = 5e6
 
-      -- frames per microsecond
-      fpus = (fromIntegral n + 1) / 5e6
+      numLeftEdges = Vector.length leftEdges
+      numRightEdges = Vector.length rightEdges
+
+      numFrames = lcm (prefixWidth * numLeftEdges)
+                      (suffixWidth * numRightEdges)
+
+      framesPerMicrosecond = fromIntegral numFrames  / durationInMicroseconds
+
+      reticule c = replicate prefixWidth '─' ++ c : replicate suffixWidth '─'
+
+  putStr "\ESC[?25l" -- hide cursor
+  putStrLn $ reticule '┬'
+  putStrLn ""
+  putStrLn $ reticule '┴'
+  putStr "\ESC[F" -- move up one line
 
   startTime <- timeSpecToMicroseconds <$> getTime Monotonic
 
-  forM_ [n,n-1..0] $ \i -> do
-    let (rfull,rpart) = (20 * i) `quotRem` n
-        (lfull,lpart) = (59 * i) `quotRem` n
-        full = rfull + lfull + 1
-        prefix = rights !! quot (3 * rpart) n
-        suffix = lefts  !! quot (8 * lpart) n
-        indent = 20 - rfull - if null prefix then 0 else 1
+  forM_ [0..numFrames] $ \frameNum -> do
+    let framesRemaining = numFrames - frameNum
+        (leftFull, leftPartial)   = (prefixWidth * framesRemaining) `quotRem` numFrames
+        (rightFull, rightPartial) = (suffixWidth * framesRemaining) `quotRem` numFrames
+        numFull = leftFull + 1 + rightFull
+        leftEdge  = leftEdges ! quot (numLeftEdges * leftPartial) numFrames
+        rightEdge = rightEdges ! quot (numRightEdges * rightPartial) numFrames
+        indent = prefixWidth - leftFull - length leftEdge
+
     putStrLn $ concat
-      [ "\ESC[F\ESC[K\ESC[", show indent, "C"
-      , prefix, replicate full '█', suffix
+      [ "\ESC[F" -- move up one line
+      , "\ESC[K" -- clear to end of line
+      , "\ESC[", show indent, "C" -- move indent characters right
+      , leftEdge, replicate numFull '█', rightEdge
       ]
 
     -- smooth out timing from threadDelay so the entire animation
@@ -40,10 +57,9 @@ main = do
     --
     -- probably undesirable in word presentation
     currTime <- timeSpecToMicroseconds <$> getTime Monotonic
-    let frameNum = fromIntegral $ n - i
-    let delay = round $ startTime + (frameNum + 1)/fpus - currTime
+    let delay = round $ startTime + (fromIntegral frameNum + 1)/framesPerMicrosecond - currTime
     threadDelay delay
 
-  putStrLn "\ESC[?25h"
+  putStrLn "\ESC[?25h" -- show cursor
   endTime <- timeSpecToMicroseconds <$> getTime Monotonic
   print $ (round $ endTime - startTime :: Integer)
