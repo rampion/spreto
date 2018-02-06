@@ -2,6 +2,7 @@
 {-# LANGUAGE RecordWildCards #-}
 module Main where
 import Options.Applicative
+import Data.List (intercalate)
 import Data.Semigroup ((<>))
 import Data.Vector ((!), Vector)
 import qualified Data.Vector as Vector
@@ -170,7 +171,7 @@ reticulePrefixWidth = orp (replicate reticuleColumnWidth 'X')
 reticuleSuffixWidth = reticuleColumnWidth - 1 - reticulePrefixWidth
 
 reticule :: String
-reticule = unlines
+reticule = intercalate "\n"
   [ line '┬'
   , ""
   , line '┴'
@@ -222,14 +223,12 @@ intro = do
     let delay = round $ startTime + (fromIntegral frameNum + 1)/framesPerMicrosecond - currTime
     threadDelay delay
 
-
-
 main :: IO ()
 main = bracket hideCursor (const showCursor) $ \_ -> do
   Options{..} <- execParser options
   ws <- words <$> readFile path
   putStr reticule
-  putStr "\ESC[F" -- move cursor to beginning of previous line
+  putStrLn "\ESC[F" -- move cursor to beginning of previous line
   intro
   let delay = round (60 * 1000000 / wpm)
   forM_ ws $ \w -> do
