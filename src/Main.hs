@@ -208,12 +208,14 @@ intro = do
         rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) numFrames
         indent = reticulePrefixWidth - leftFull - length leftEdge
 
-    putStrLn $ concat
+    putStr $ concat
       [ "\ESC[F" -- move up one line
       , "\ESC[K" -- clear to end of line
-      , "\ESC[", show indent, "C" -- move indent characters right
-      , leftEdge, replicate numFull '█', rightEdge
       ]
+    when (indent > 0) . putStr $ concat
+      [ "\ESC[", show indent, "C" ] -- move indent characters right; \ESC[0C moves 1, not 0
+    putStrLn $ concat
+      [ leftEdge, replicate numFull '█', rightEdge ]
 
     -- smooth out timing from threadDelay so the entire animation
     -- takes no longer than desired
