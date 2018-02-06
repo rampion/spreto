@@ -2,7 +2,7 @@ default:
 
 all: configure install-dependencies build doc test
 
-example:
+run-example:
 	cabal run spreto -- examples/alice.txt
 
 configure:
