@@ -3,9 +3,12 @@
 module Main where
 import Options.Applicative
 import Data.Semigroup ((<>))
+import Data.Vector ((!), Vector)
+import qualified Data.Vector as Vector
 import Control.Monad
 import Control.Concurrent
 import Control.Exception.Base (bracket)
+import System.Clock
 import System.IO
 
 data Position = Position
@@ -161,35 +164,72 @@ data State = State
   }
   -}
 
+reticuleColumnWidth, reticulePrefixWidth, reticuleSuffixWidth :: Int
+reticuleColumnWidth = 80
+reticulePrefixWidth = orp (replicate reticuleColumnWidth 'X')
+reticuleSuffixWidth = reticuleColumnWidth - 1 - reticulePrefixWidth
+
+reticule :: String
+reticule = unlines
+  [ line '┬'
+  , ""
+  , line '┴'
+  ] where line c = replicate reticulePrefixWidth '─' ++ c : replicate reticuleSuffixWidth '─' 
+
+introDurationInMicroseconds :: Double
+introDurationInMicroseconds = 5e6
+
+introLeftEdges, introRightEdges :: Vector String
+introLeftEdges   = Vector.fromList $ "" : map return "▕▐" 
+introRightEdges  = Vector.fromList $ "" : map return "▏▎▍▌▋▊▉"
+
+timeSpecToMicroseconds :: TimeSpec -> Double
+timeSpecToMicroseconds TimeSpec{..} = 1000*1000*fromIntegral sec + fromIntegral nsec / 1000
+
 intro :: IO ()
 intro = do
-  let n = lcm (59*8) (20*3)
-      runtimeInMicroseconds = 3000000
-      microsecondsPerBar = runtimeInMicroseconds `div` n
-      lefts  = "" : map return "▏▎▍▌▋▊▉" 
-      rights = "" : map return "▕▐"
-  forM_ [n,n-1..0] $ \i -> do
-    let (rfull,rpart) = (20 * i) `quotRem` n
-        (lfull,lpart) = (59 * i) `quotRem` n
-        full = rfull + lfull + 1
-        prefix = rights !! quot (3 * rpart) n
-        suffix = lefts  !! quot (8 * lpart) n
-        indent = 20 - rfull - if null prefix then 0 else 1
+  let numLeftEdges = Vector.length introLeftEdges
+      numRightEdges = Vector.length introRightEdges
+
+      numFrames = lcm (reticulePrefixWidth * numLeftEdges)
+                      (reticuleSuffixWidth * numRightEdges)
+
+      framesPerMicrosecond = fromIntegral numFrames  / introDurationInMicroseconds
+
+  startTime <- timeSpecToMicroseconds <$> getTime Monotonic
+
+  forM_ [0..numFrames] $ \frameNum -> do
+    let framesRemaining = numFrames - frameNum
+        (leftFull, leftPartial)   = (reticulePrefixWidth * framesRemaining) `quotRem` numFrames
+        (rightFull, rightPartial) = (reticuleSuffixWidth * framesRemaining) `quotRem` numFrames
+        numFull = leftFull + 1 + rightFull
+        leftEdge  = introLeftEdges ! quot (numLeftEdges * leftPartial) numFrames
+        rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) numFrames
+        indent = reticulePrefixWidth - leftFull - length leftEdge
+
     putStrLn $ concat
-      -- \ESC[<N>C - move cursor N columns right
-      [ "\ESC[F\ESC[K\ESC[", show indent, "C"
-      , prefix, replicate full '█', suffix
+      [ "\ESC[F" -- move up one line
+      , "\ESC[K" -- clear to end of line
+      , "\ESC[", show indent, "C" -- move indent characters right
+      , leftEdge, replicate numFull '█', rightEdge
       ]
-    threadDelay microsecondsPerBar
+
+    -- smooth out timing from threadDelay so the entire animation
+    -- takes no longer than desired
+    --
+    -- probably undesirable in word presentation
+    currTime <- timeSpecToMicroseconds <$> getTime Monotonic
+    let delay = round $ startTime + (fromIntegral frameNum + 1)/framesPerMicrosecond - currTime
+    threadDelay delay
+
+
 
 main :: IO ()
 main = bracket hideCursor (const showCursor) $ \_ -> do
   Options{..} <- execParser options
   ws <- words <$> readFile path
-  putStrLn "────────────────────┬───────────────────────────────────────────────────────────"
-  putStrLn ""
-  -- \ESC[F - move cursor to beginning of previous line
-  putStrLn "────────────────────┴───────────────────────────────────────────────────────────\ESC[F"
+  putStr reticule
+  putStr "\ESC[F" -- move cursor to beginning of previous line
   intro
   let delay = round (60 * 1000000 / wpm)
   forM_ ws $ \w -> do
