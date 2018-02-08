@@ -1,9 +1,11 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
 module Main where
 import Control.Monad (void)
-import Control.Concurrent (ThreadId)
+import Control.Monad.IO.Class (liftIO)
+import Control.Concurrent (ThreadId, forkIO, threadDelay)
 import Data.Semigroup ((<>))
 import Data.Vector ((!), Vector)
 import qualified Data.Vector as Vector
@@ -21,7 +23,7 @@ import Brick
   )
 import qualified Brick
 import Brick.BChan 
-  ( BChan, newBChan
+  ( BChan, newBChan, writeBChan
   )
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -63,14 +65,14 @@ data Direction
   | Backwards
 
 data Mode 
-  = Introing { nextFrame :: Int, start :: !Microseconds }
-  | Reading { wordTimer :: !ThreadId, lastWord :: !Microseconds }
+  = Introing { timer :: !ThreadId, frameNum :: Int, startTime :: !Microseconds }
+  | Reading { timer :: !ThreadId, lastWord :: !Microseconds }
   | Paused { showHelp :: !Bool }
-  | Unpausing { nextFrame :: Int, start :: !Microseconds }
+  | Unpausing { timer :: !ThreadId, frameNum :: Int, startTime :: !Microseconds }
   | Finished
 
 data Event
-  = PrintAndAdvance
+  = Advance
 
 {-
 data Action
@@ -215,12 +217,12 @@ draw :: Env -> State -> [Widget Name]
 draw Env{..} = return . drawState where
 
   drawState State{ mode=Introing{..} } =
-    let framesRemaining = numFrames - nextFrame
-        (leftFull, leftPartial)   = (prefixWidth * framesRemaining) `quotRem` numFrames
-        (rightFull, rightPartial) = (suffixWidth * framesRemaining) `quotRem` numFrames
+    let framesRemaining = lastFrame - frameNum
+        (leftFull, leftPartial)   = (prefixWidth * framesRemaining) `quotRem` lastFrame
+        (rightFull, rightPartial) = (suffixWidth * framesRemaining) `quotRem` lastFrame
         numFull = leftFull + 1 + rightFull
-        leftEdge  = introLeftEdges ! quot (numLeftEdges * leftPartial) numFrames
-        rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) numFrames
+        leftEdge  = introLeftEdges ! quot (numLeftEdges * leftPartial) lastFrame
+        rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) lastFrame
         indent = prefixWidth - leftFull - length leftEdge
 
     in
@@ -258,10 +260,12 @@ draw Env{..} = return . drawState where
   prefixWidth = orp (Text.replicate reticuleWidth "X")
   suffixWidth = reticuleWidth - 1 - prefixWidth
 
-  numFrames = lcm (prefixWidth * numLeftEdges)
+  lastFrame = lcm (prefixWidth * numLeftEdges)
                   (suffixWidth * numRightEdges)
-  numLeftEdges = Vector.length introLeftEdges
-  numRightEdges = Vector.length introRightEdges
+
+numLeftEdges, numRightEdges :: Int
+numLeftEdges = Vector.length introLeftEdges
+numRightEdges = Vector.length introRightEdges
 
 introLeftEdges, introRightEdges :: Vector String
 introLeftEdges   = Vector.fromList $ "" : map return "▕▐" 
@@ -274,7 +278,46 @@ wordFocus = "wordFocus"
 wordSuffix = "wordSuffix"
 
 handleEvent :: Env -> State -> BrickEvent Name Event -> EventM Name (Next State)
-handleEvent = const $ const . halt
+handleEvent Env{..} = handleStateEvent where
+
+  handleStateEvent st@State{ mode=Introing{..}, ..} = \case
+    Brick.AppEvent Advance | frameNum < lastFrame -> do
+      let nextTime = startTime + (fromIntegral frameNum + 1)/framesPerMicrosecond
+      timer <- liftIO . forkIO $ do
+        currTime <- getCurrentTime
+        threadDelay $ round (nextTime - currTime)
+        writeBChan events Advance
+      Brick.continue st { mode=Introing{ frameNum = frameNum + 1,..} }
+
+    Brick.AppEvent Advance | frameNum == lastFrame -> do
+      lastWord <- liftIO $ getCurrentTime
+      timer <- liftIO . forkIO $ do
+        threadDelay $ round (60e6 / wpm)
+        writeBChan events Advance
+      Brick.continue st { mode=Reading{..} }
+
+    _ -> Brick.continue st
+
+  handleStateEvent st@State{ mode=Reading{..}, ..} = \case
+    Brick.AppEvent Advance -> case move ToNextWord here of
+      Just here -> do
+        lastWord <- liftIO $ getCurrentTime
+        timer <- liftIO . forkIO $ do
+          threadDelay $ round (60e6 / wpm)
+          writeBChan events Advance
+        Brick.continue State { mode=Reading{..}, .. }
+      Nothing -> halt st
+    _ -> halt st
+  handleStateEvent st = \_ -> halt st
+
+  prefixWidth = orp (Text.replicate reticuleWidth "X")
+  suffixWidth = reticuleWidth - 1 - prefixWidth
+
+  lastFrame = lcm (prefixWidth * numLeftEdges)
+                  (suffixWidth * numRightEdges)
+
+  introDurationInMicroseconds = 5e6
+  framesPerMicrosecond = fromIntegral lastFrame  / introDurationInMicroseconds
 
 main :: IO ()
 main = do
@@ -290,7 +333,10 @@ main = do
     TextIO.hPutStrLn stderr . Text.pack $ "ERROR: illegal start position " <> show initialPos <> " in document " <> path
     exitFailure
   events <- newBChan 10 -- Q: why 10? A: stolen from the example
-  mode <- Introing 0 <$> getCurrentTime
+  startTime <- getCurrentTime
+  timer <- forkIO $ writeBChan events Advance
+  let mode | skipIntro = Reading { lastWord = startTime - 60e6 / wpm, ..}
+           | otherwise = Introing { frameNum = 0, .. }
   -- XXX: takes over the entire display, which is non-optimal
   --      see https://github.com/jtdaugherty/vty/issues/143
   void $ customMain 
@@ -298,25 +344,6 @@ main = do
           (Just events) 
           (makeApp Env{..}) 
           State{..} 
-
-{-
-    when (not skipIntro) intro
-    let delay = round (60 * 1000000 / initialWpm)
-      threadDelay delay
-
-      return () `maybe` loop $ move ToNextWord here 
-
-
-      framesPerMicrosecond = fromIntegral numFrames  / introDurationInMicroseconds
-
-  startTime <- getCurrentTime
-
-
-    -- smooth out timing from threadDelay so the entire animation
-    -- takes no longer than desired
-    --
-    -- probably undesirable in word presentation
-    currTime <- getCurrentTime
-    let delay = round $ startTime + (fromIntegral frameNum + 1)/framesPerMicrosecond - currTime
-    threadDelay delay
-    -}
+  -- clear the bottom line if exit after intro
+  putStrLn ""
+  putStrLn ""
