@@ -46,7 +46,7 @@ import Position (Position(..))
 type Microseconds = Double
 
 data Env = Env
-  { startDuration   :: Maybe Microseconds
+  { introDuration   :: Maybe Microseconds
   , unpauseDuration :: Maybe Microseconds
   , reticuleWidth   :: Int
   , events          :: BChan Event
@@ -65,11 +65,11 @@ data Direction
   | Backwards
 
 data Mode 
-  = Introing { timer :: !ThreadId, frameNum :: Int, startTime :: !Microseconds }
-  | Reading { timer :: !ThreadId, lastWord :: !Microseconds }
+  = Starting
+  | Introing { timer :: !ThreadId, frameNum :: Int, startTime :: !Microseconds }
+  | Reading { timer :: !ThreadId, lastMove :: !Microseconds }
   | Paused { showHelp :: !Bool }
   | Unpausing { timer :: !ThreadId, frameNum :: Int, startTime :: !Microseconds }
-  | Finished
 
 data Event
   = Advance
@@ -245,7 +245,7 @@ draw Env{..} = return . drawState where
 
   drawState State{ mode=Paused{..} } = Brick.str "Paused"
   drawState State{ mode=Unpausing{..} } = Brick.str "Unpausing"
-  drawState State{ mode=Finished } = Brick.str "Finished"
+  drawState State{ mode=Starting } = Brick.emptyWidget
 
   reticule n xs = Brick.vBox
     [ Brick.str reticuleTop
@@ -280,32 +280,42 @@ wordSuffix = "wordSuffix"
 handleEvent :: Env -> State -> BrickEvent Name Event -> EventM Name (Next State)
 handleEvent Env{..} = handleStateEvent where
 
+  introing frameNum startTime = do
+    let nextTime = startTime + (fromIntegral frameNum / framesPerMicrosecond)
+    timer <- forkIO $ do
+      currTime <- getCurrentTime
+      threadDelay $ round (nextTime - currTime)
+      writeBChan events Advance
+    return Introing { .. }
+
+  reading wpm lastMove = do
+    timer <- liftIO . forkIO $ do
+      threadDelay $ round (60e6 / wpm)
+      writeBChan events Advance
+    return Reading { .. }
+
+  handleStateEvent st@State { mode=Starting, .. } = \case
+    Brick.AppEvent Advance -> 
+      mode <- getCurrentTime >>= if showIntro then introing 0 else reading wpm
+      continue State { .. }
+    _ -> continue st
+
   handleStateEvent st@State{ mode=Introing{..}, ..} = \case
     Brick.AppEvent Advance | frameNum < lastFrame -> do
-      let nextTime = startTime + (fromIntegral frameNum + 1)/framesPerMicrosecond
-      timer <- liftIO . forkIO $ do
-        currTime <- getCurrentTime
-        threadDelay $ round (nextTime - currTime)
-        writeBChan events Advance
-      Brick.continue st { mode=Introing{ frameNum = frameNum + 1,..} }
+      mode <- introing (frameNum + 1) startTime 
+      Brick.continue State {..}
 
     Brick.AppEvent Advance | frameNum == lastFrame -> do
-      lastWord <- liftIO $ getCurrentTime
-      timer <- liftIO . forkIO $ do
-        threadDelay $ round (60e6 / wpm)
-        writeBChan events Advance
-      Brick.continue st { mode=Reading{..} }
+      mode <- liftIO $ getCurrentTime >>= reading wpm 
+      Brick.continue State { .. }
 
     _ -> Brick.continue st
 
   handleStateEvent st@State{ mode=Reading{..}, ..} = \case
     Brick.AppEvent Advance -> case move ToNextWord here of
       Just here -> do
-        lastWord <- liftIO $ getCurrentTime
-        timer <- liftIO . forkIO $ do
-          threadDelay $ round (60e6 / wpm)
-          writeBChan events Advance
-        Brick.continue State { mode=Reading{..}, .. }
+        mode <- liftIO $ getCurrentTime >>= reading wpm 
+        Brick.continue State { .. }
       Nothing -> halt st
     _ -> halt st
   handleStateEvent st = \_ -> halt st
@@ -322,21 +332,19 @@ handleEvent Env{..} = handleStateEvent where
 main :: IO ()
 main = do
   Options{..} <- execParser options
-  let startDuration   = if skipIntro then Nothing else Just 5e6
+  let introDuration   = if skipIntro then Nothing else Just 5e6
       unpauseDuration = if skipIntro then Nothing else Just 5e6
       wpm             = initialWpm
       reticuleWidth   = 80 -- Q: why 80? A: 80 columns is a "standard" code width
       direction       = Forwards
       attributes      = attrMap Vty.defAttr [(wordFocus, Brick.fg Vty.red)]
+      mode            = Starting
   document <- parseDocument <$> TextIO.readFile path
   here <- cursor document initialPos `orElseM` do
     TextIO.hPutStrLn stderr . Text.pack $ "ERROR: illegal start position " <> show initialPos <> " in document " <> path
     exitFailure
   events <- newBChan 10 -- Q: why 10? A: stolen from the example
-  startTime <- getCurrentTime
-  timer <- forkIO $ writeBChan events Advance
-  let mode | skipIntro = Reading { lastWord = startTime - 60e6 / wpm, ..}
-           | otherwise = Introing { frameNum = 0, .. }
+  writeBChan events Advance
   -- XXX: takes over the entire display, which is non-optimal
   --      see https://github.com/jtdaugherty/vty/issues/143
   void $ customMain 
@@ -347,3 +355,4 @@ main = do
   -- clear the bottom line if exit after intro
   putStrLn ""
   putStrLn ""
+
