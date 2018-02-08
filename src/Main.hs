@@ -5,6 +5,8 @@ module Main where
 import Control.Monad (void)
 import Control.Concurrent (ThreadId)
 import Data.Semigroup ((<>))
+import Data.Vector ((!), Vector)
+import qualified Data.Vector as Vector
 import System.Exit (exitFailure)
 import System.IO (stderr)
 
@@ -65,7 +67,7 @@ data Mode
   | Reading { wordTimer :: !ThreadId, lastWord :: !Microseconds }
   | Paused { showHelp :: !Bool }
   | Unpausing { nextFrame :: Int, start :: !Microseconds }
-  | Done
+  | Finished
 
 data Event
   = PrintAndAdvance
@@ -210,7 +212,66 @@ makeApp env = App
   }
 
 draw :: Env -> State -> [Widget Name]
-draw = const $ const [ Brick.str "(press any key to quit)" ]
+draw Env{..} = return . drawState where
+
+  drawState State{ mode=Introing{..} } =
+    let framesRemaining = numFrames - nextFrame
+        (leftFull, leftPartial)   = (prefixWidth * framesRemaining) `quotRem` numFrames
+        (rightFull, rightPartial) = (suffixWidth * framesRemaining) `quotRem` numFrames
+        numFull = leftFull + 1 + rightFull
+        leftEdge  = introLeftEdges ! quot (numLeftEdges * leftPartial) numFrames
+        rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) numFrames
+        indent = prefixWidth - leftFull - length leftEdge
+
+    in
+    reticule indent 
+      [ Brick.str leftEdge
+      , Brick.str $ replicate numFull '█'
+      , Brick.str rightEdge
+      ]
+      
+  drawState State{ mode=Reading{..}, ..} = 
+    let word = getWord here
+        n = orp word
+        (pre,Just (c, suf)) = Text.uncons <$> Text.splitAt n word
+    in 
+    reticule (prefixWidth - n)
+      [ Brick.withAttr wordPrefix $ Brick.txt pre
+      , Brick.withAttr wordFocus  $ Brick.str [c]
+      , Brick.withAttr wordSuffix $ Brick.txt suf
+      ] 
+
+  drawState State{ mode=Paused{..} } = Brick.str "Paused"
+  drawState State{ mode=Unpausing{..} } = Brick.str "Unpausing"
+  drawState State{ mode=Finished } = Brick.str "Finished"
+
+  reticule n xs = Brick.vBox
+    [ Brick.str reticuleTop
+    , Brick.padLeft (Brick.Pad n) (Brick.hBox xs)
+    , Brick.str reticuleBottom
+    ]
+
+  reticuleTop     = reticuleLine '┬'
+  reticuleBottom  = reticuleLine '┴'
+  reticuleLine c = replicate prefixWidth '─' ++ c : replicate suffixWidth '─'
+
+  prefixWidth = orp (Text.replicate reticuleWidth "X")
+  suffixWidth = reticuleWidth - 1 - prefixWidth
+
+  numFrames = lcm (prefixWidth * numLeftEdges)
+                  (suffixWidth * numRightEdges)
+  numLeftEdges = Vector.length introLeftEdges
+  numRightEdges = Vector.length introRightEdges
+
+introLeftEdges, introRightEdges :: Vector String
+introLeftEdges   = Vector.fromList $ "" : map return "▕▐" 
+introRightEdges  = Vector.fromList $ "" : map return "▏▎▍▌▋▊▉"
+
+-- Use variables rather than literals to protect against typos
+wordPrefix, wordFocus, wordSuffix :: Brick.AttrName
+wordPrefix = "wordPrefix"
+wordFocus = "wordFocus"
+wordSuffix = "wordSuffix"
 
 handleEvent :: Env -> State -> BrickEvent Name Event -> EventM Name (Next State)
 handleEvent = const $ const . halt
@@ -223,7 +284,7 @@ main = do
       wpm             = initialWpm
       reticuleWidth   = 80 -- Q: why 80? A: 80 columns is a "standard" code width
       direction       = Forwards
-      attributes      = attrMap Vty.defAttr []
+      attributes      = attrMap Vty.defAttr [(wordFocus, Brick.fg Vty.red)]
   document <- parseDocument <$> TextIO.readFile path
   here <- cursor document initialPos `orElseM` do
     TextIO.hPutStrLn stderr . Text.pack $ "ERROR: illegal start position " <> show initialPos <> " in document " <> path
@@ -239,94 +300,17 @@ main = do
           State{..} 
 
 {-
-  bracket hideCursor (const showCursor) $ \_ -> do
-
-    putStr reticule
-    putStrLn "\ESC[F" -- move cursor to beginning of previous line
-    void $ forkIO $ forever $ do
-      writeBChan chan Tick
-      threadDelay 100000 -- decides how fast you game moves
-    g <- initGame <$> newStdGen
-    void $ customMain (Vty.mkVty Vty.defaultConfig) (Just chan) app g
-    
     when (not skipIntro) intro
     let delay = round (60 * 1000000 / initialWpm)
-
-    flip fix here $ \loop here -> do
-      let word = getWord here
-      let n = orp word
-      let (pre,Just (c, suf)) = Text.uncons <$> Text.splitAt n word
-      TextIO.putStrLn $ Text.concat
-        [ "\ESC[F" -- move to beinning of previous line
-        , "\ESC[K" -- clear to end of line
-        -- \ESC[C - move cursor right
-        -- to align ORP character with reticule
-        , "\ESC[", Text.pack (show (20 - n)), "C"
-        , pre
-        -- \ESC[31m - highlight ORP character in red
-        , "\ESC[31m"
-        , Text.singleton c
-        , "\ESC[m"
-        , suf
-        ]
       threadDelay delay
 
       return () `maybe` loop $ move ToNextWord here 
 
-    putStrLn ""
-
-hideCursor, showCursor :: IO ()
-hideCursor = putStr "\ESC[?25l" >> hFlush stdout
-showCursor = putStr "\ESC[?25h" >> hFlush stdout
-
-reticuleColumnWidth, reticulePrefixWidth, reticuleSuffixWidth :: Int
-reticuleColumnWidth = 80
-reticulePrefixWidth = orp (Text.replicate reticuleColumnWidth "X")
-reticuleSuffixWidth = reticuleColumnWidth - 1 - reticulePrefixWidth
-
-reticule :: String
-reticule = intercalate "\n"
-  [ line '┬'
-  , ""
-  , line '┴'
-  ] where line c = replicate reticulePrefixWidth '─' ++ c : replicate reticuleSuffixWidth '─' 
-
-introDurationInMicroseconds :: Double
-introDurationInMicroseconds = 5e6
-
-introLeftEdges, introRightEdges :: Vector String
-introLeftEdges   = Vector.fromList $ "" : map return "▕▐" 
-introRightEdges  = Vector.fromList $ "" : map return "▏▎▍▌▋▊▉"
-
-intro :: IO ()
-intro = do
-  let numLeftEdges = Vector.length introLeftEdges
-      numRightEdges = Vector.length introRightEdges
-
-      numFrames = lcm (reticulePrefixWidth * numLeftEdges)
-                      (reticuleSuffixWidth * numRightEdges)
 
       framesPerMicrosecond = fromIntegral numFrames  / introDurationInMicroseconds
 
   startTime <- getCurrentTime
 
-  forM_ [0..numFrames] $ \frameNum -> do
-    let framesRemaining = numFrames - frameNum
-        (leftFull, leftPartial)   = (reticulePrefixWidth * framesRemaining) `quotRem` numFrames
-        (rightFull, rightPartial) = (reticuleSuffixWidth * framesRemaining) `quotRem` numFrames
-        numFull = leftFull + 1 + rightFull
-        leftEdge  = introLeftEdges ! quot (numLeftEdges * leftPartial) numFrames
-        rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) numFrames
-        indent = reticulePrefixWidth - leftFull - length leftEdge
-
-    putStr $ concat
-      [ "\ESC[F" -- move up one line
-      , "\ESC[K" -- clear to end of line
-      ]
-    when (indent > 0) . putStr $ concat
-      [ "\ESC[", show indent, "C" ] -- move indent characters right; \ESC[0C moves 1, not 0
-    putStrLn $ concat
-      [ leftEdge, replicate numFull '█', rightEdge ]
 
     -- smooth out timing from threadDelay so the entire animation
     -- takes no longer than desired
@@ -335,8 +319,4 @@ intro = do
     currTime <- getCurrentTime
     let delay = round $ startTime + (fromIntegral frameNum + 1)/framesPerMicrosecond - currTime
     threadDelay delay
-
-
-import Data.Vector ((!), Vector)
-import qualified Data.Vector as Vector
     -}
