@@ -1,4 +1,6 @@
 module ORP where
+import Data.Text (Text)
+import qualified Data.Text as Text
 
 -- |
 -- Approximate the "optimal recognition point" (ORP) for a given word,
@@ -39,3 +41,7 @@ orp :: Text -> Int
 -- E/ach w/ord i/s de/livered t/o y/our e/yes i/n t/he pe/rfect po/sition 
 -- In/stead o/f y/ou 
 orp w = (Text.length w + 2) `div` 4
+
+-- TODO: Switch to using Brick.Widgets.Core.textWidth :: Text -> Int
+-- or Graphics.Text.Width.wcswidth :: String -> Int
+-- or Graphics.Text.Width.wcwidth :: Char -> Int

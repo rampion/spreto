@@ -1,9 +1,7 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
-import Data.Semigroup ((<>))
 import System.Exit (exitFailure)
 import System.IO (stderr)
 
@@ -15,9 +13,8 @@ import qualified Graphics.Vty as Vty
 
 import Cursor (cursor)
 import Document (parseDocument)
-import Position (Position(..))
-import Options
-import UI
+import Options (Options(..), options, execParser)
+import UI 
 
 orElseM :: Monad m => Maybe a -> m a -> m a
 orElseM (Just a) _ = return a
@@ -33,12 +30,9 @@ main = do
       [ "ERROR: illegal start position"
       , Text.pack $ show initialPos
       , "in document"
-      ,  path
+      , Text.pack $ path
       ]
     exitFailure
-
-  -- prime the pump
-  BChan.writeBChan events Advance
 
   -- XXX: takes over the entire display, which is non-optimal
   --      see https://github.com/jtdaugherty/vty/issues/143
@@ -48,13 +42,18 @@ main = do
             , unpauseDuration = if skipIntro then Nothing else Just 5e6
             , reticuleWidth   = 80 -- Q: why 80? A: 80 columns is a "standard" code width
             , events          = events
-            , attributes      = attrMap Vty.defAttr [(wordFocus, Brick.fg Vty.red)]
+            , attributes      = Brick.attrMap Vty.defAttr 
+                                  [ (wordFocus, Brick.fg Vty.red)
+                                  , (contextPrefix, Brick.fg Vty.cyan)
+                                  , (contextSuffix, Brick.fg Vty.cyan)
+                                  ]
             }
-          State
+          St
             { wpm       = initialWpm
             , direction = Forwards
             , mode      = Starting
             , here      = here
+            , progress  = Percentage
             }
 
   -- clear the bottom line if exit after intro

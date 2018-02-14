@@ -1,7 +1,11 @@
 module Options
   (Options(..), options, execParser)
+where
+import Data.Semigroup ((<>))
 
 import Options.Applicative 
+
+import Position (Position(Position))
 
 data Options = Options
   { initialWpm  :: Double
