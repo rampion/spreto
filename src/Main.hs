@@ -34,26 +34,29 @@ main = do
       ]
     exitFailure
 
+  vty <- Vty.mkVty Vty.defaultConfig
+  (numCols, _numRows) <- Vty.displayBounds $ Vty.outputIface vty
+
+  let env = Env
+        { introDuration   = if skipIntro then Nothing else Just 5e6
+        , unpauseDuration = if skipIntro then Nothing else Just 5e6
+        , events          = events
+        , attributes      = Brick.attrMap Vty.defAttr 
+                              [ (wordFocus, Brick.fg Vty.red)
+                              , (contextPrefix, Brick.fg Vty.cyan)
+                              , (contextSuffix, Brick.fg Vty.cyan)
+                              ]
+        }
+
   -- XXX: takes over the entire display, which is non-optimal
   --      see https://github.com/jtdaugherty/vty/issues/143
-  _st <- (Brick.customMain (Vty.mkVty Vty.defaultConfig) (Just events) . makeApp)
-          Env
-            { introDuration   = if skipIntro then Nothing else Just 5e6
-            , unpauseDuration = if skipIntro then Nothing else Just 5e6
-            , reticuleWidth   = 80 -- Q: why 80? A: 80 columns is a "standard" code width
-            , events          = events
-            , attributes      = Brick.attrMap Vty.defAttr 
-                                  [ (wordFocus, Brick.fg Vty.red)
-                                  , (contextPrefix, Brick.fg Vty.cyan)
-                                  , (contextSuffix, Brick.fg Vty.cyan)
-                                  ]
-            }
-          St
+  _st <- (Brick.customMain (return vty) (Just events) . makeApp) env St
             { wpm       = initialWpm
             , direction = Forwards
-            , mode      = Starting
             , here      = here
             , progress  = Percentage
+            , reticule  = makeReticule env numCols
+            , mode      = Starting
             }
 
   -- clear the bottom line if exit after intro

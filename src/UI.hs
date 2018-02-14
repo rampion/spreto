@@ -34,6 +34,7 @@ import Cursor (Cursor, move, Increment(..), getWord)
 type Microseconds = Double
 type WPM = Double
 type FrameIndex = Int
+type Columns = Int
 
 -- | environment parameters given by the user
 data Environment = Env
@@ -43,36 +44,19 @@ data Environment = Env
   , attributes      :: AttrMap
   }
 
--- | derived environment parameters
-data Derived = Der
-  { reticuleWidth             :: Int
-  , prefixWidth               :: Int
-  , suffixWidth               :: Int
-  , lastIntroFrame            :: FrameIndex
-  , lastUnpauseFrame          :: FrameIndex
-  , introFramesPerMicrosecond :: Double
-  , reticule :: Int -> [Widget Name] -> Widget Name
-  }
-
 data State = St
-  { wpm         :: !WPM
-  , direction   :: !Direction
-  , mode        :: !Mode
-  , here        :: !Cursor
-  , progress    :: !Progress
+  { wpm           :: !WPM       -- ^ rate at which to show words
+  , direction     :: !Direction -- ^ reading forwards or backwards
+  , here          :: !Cursor    -- ^ current position in the text
+  , progress      :: !Progress  -- ^ how to show progress when paused
+  , reticule      :: !Reticule
+  , mode          :: !Mode
   }
 
 data Direction
   = Forwards
   | Backwards
   deriving (Eq)
-
-data Mode 
-  = Starting
-  | Introing { timer :: !ThreadId, frameNum :: !FrameIndex, startTime :: !Microseconds }
-  | Reading { timer :: !ThreadId, lastMove :: !Microseconds }
-  | Paused { showHelp :: !Bool }
-  | Unpausing { timer :: !ThreadId, frameNum :: !FrameIndex, startTime :: !Microseconds }
 
 data Progress
   = Percentage
@@ -81,6 +65,38 @@ data Progress
   | FractionSentences
   | FractionWords
 
+-- | derived from the environment parameters
+--   and the rendering context
+data Reticule = Reticule
+  { prefixWidth                 :: !Columns
+  , suffixWidth                 :: !Columns
+  , lastIntroFrame              :: !FrameIndex
+  , introFramesPerMicrosecond   :: !Double
+  , lastUnpauseFrame            :: FrameIndex -- TODO: make strict
+  , unpauseFramesPerMicrosecond :: Double -- TODO: make strict
+  , drawReticule :: !(Columns -> [Widget Name] -> Widget Name)
+  }
+
+data Mode 
+  = Starting
+  | Introing
+    { timer     :: !ThreadId
+    , frameNum  :: !FrameIndex
+    , startTime :: !Microseconds
+    }
+  | Reading
+    { timer     :: !ThreadId
+    , lastMove  :: !Microseconds
+    }
+  | Paused
+    { showHelp  :: !Bool
+    }
+  | Unpausing
+    { timer     :: !ThreadId
+    , frameNum  :: !FrameIndex
+    , startTime :: !Microseconds
+    }
+
 newtype Event
   = Advance { source :: ThreadId }
 
@@ -88,38 +104,37 @@ newtype Event
 --
 -- Not currently used, but will be easier to refactor
 -- if we call this "Name" now.
-type Name = ()
+data Name = Name deriving (Eq, Ord)
 
-type Command = Environment -> Derived -> State -> EventM Name (Next State)
+type Command = Environment -> State -> EventM Name (Next State)
 type Binding = (Vty.Key, Command)
 
 makeApp :: Environment -> App State Event Name
 makeApp env = App
-  { appDraw         = draw env der
+  { appDraw         = draw env
   , appChooseCursor = neverShowCursor
-  , appHandleEvent  = handleEvent env der
-  , appStartEvent   = cueStart env der
+  , appHandleEvent  = handleEvent env
+  , appStartEvent   = cueStart env
   , appAttrMap      = const (attributes env)
   }
-  where der = derived env
 
-derived :: Environment -> Derived
-derived Env{..} = Der {..} where
+makeReticule :: Environment -> Columns -> Reticule
+makeReticule Env{..} reticuleWidth = Reticule {..} where
   prefixWidth = orp (Text.replicate reticuleWidth "X")
   suffixWidth = reticuleWidth - 1 - prefixWidth
   lastIntroFrame = lcm (prefixWidth * numLeftEdges) (suffixWidth * numRightEdges)
   introFramesPerMicrosecond = fromIntegral lastIntroFrame  / fromMaybe 0 introDuration
   lastUnpauseFrame          = undefined
+  unpauseFramesPerMicrosecond = undefined
+  reticuleTop     = reticuleLine '┬'
+  reticuleBottom  = reticuleLine '┴'
+  reticuleLine c = replicate prefixWidth '─' ++ c : replicate suffixWidth '─'
 
-  reticule n xs = vBox
+  drawReticule n xs = vBox
     [ str reticuleTop
     , padLeft (Pad n) (hBox xs)
     , str reticuleBottom
     ]
-
-  reticuleTop     = reticuleLine '┬'
-  reticuleBottom  = reticuleLine '┴'
-  reticuleLine c = replicate prefixWidth '─' ++ c : replicate suffixWidth '─'
 
 usage :: [(String, [Binding])]
 usage = 
@@ -163,9 +178,10 @@ getCurrentTime = liftIO $ do
   TimeSpec{..} <- getTime Monotonic
   return $ 1000*1000*fromIntegral sec + fromIntegral nsec / 1000
 
-draw :: Environment -> Derived -> State -> [Widget Name]
-draw Env{..} der@Der{..} St{..} = return $ case mode of
+draw :: Environment -> State -> [Widget Name]
+draw Env{..} St{..} = return $ case mode of
   Starting -> emptyWidget
+
   Introing{..} ->
     let framesRemaining = lastIntroFrame - frameNum
         (leftFull, leftPartial)   = (prefixWidth * framesRemaining) `quotRem` lastIntroFrame
@@ -176,7 +192,7 @@ draw Env{..} der@Der{..} St{..} = return $ case mode of
         indent = prefixWidth - leftFull - length leftEdge
 
     in
-    reticule indent 
+    drawReticule indent 
       [ str leftEdge
       , str $ replicate numFull '█'
       , str rightEdge
@@ -187,7 +203,7 @@ draw Env{..} der@Der{..} St{..} = return $ case mode of
         n = orp word
         (pre,Just (c, suf)) = Text.uncons <$> Text.splitAt n word
     in 
-    reticule (prefixWidth - n)
+    drawReticule (prefixWidth - n)
       [ withAttr wordPrefix $ txt pre
       , withAttr wordFocus  $ str [c]
       , withAttr wordSuffix $ txt suf
@@ -220,10 +236,10 @@ draw Env{..} der@Der{..} St{..} = return $ case mode of
     250wpm                         15073/29465 words                         403.0.1
 -}
   Paused{..} -> 
-    let (cpre, wpre, wfoc, wsuf, csuf) = context der here
+    let (cpre, wpre, wfoc, wsuf, csuf) = context reticule here
     in
     vBox
-      [ reticule (prefixWidth - Text.length cpre - Text.length wpre)
+      [ drawReticule (prefixWidth - Text.length cpre - Text.length wpre)
           [ withAttr contextPrefix $ txt cpre
           , withAttr wordPrefix $ txt wpre
           , withAttr wordFocus $ str [wfoc]
@@ -240,8 +256,10 @@ draw Env{..} der@Der{..} St{..} = return $ case mode of
   Unpausing{..} -> undefined
     -- cropLeftBy / cropRightBy
 
-context :: Derived -> Cursor -> (Text, Text, Char, Text, Text)
-context Der{..} here = (cpre, wpre, wfoc, wsuf, csuf) where
+  where Reticule{..} = reticule
+
+context :: Reticule -> Cursor -> (Text, Text, Char, Text, Text)
+context Reticule{..} here = (cpre, wpre, wfoc, wsuf, csuf) where
   word = getWord here
   n = orp word
   (wpre,Just (wfoc, wsuf)) = Text.uncons <$> Text.splitAt n word
@@ -276,23 +294,23 @@ wordSuffix  = "wordSuffix"
 contextPrefix = "contextPrefix"
 contextSuffix = "contextSuffix"
 
-cueStart :: Environment -> Derived -> State -> EventM Name State 
-cueStart env@Env{..} der St{..} = do
-  let next | isJust introDuration = introing env der 0
+cueStart :: Environment -> State -> EventM Name State 
+cueStart env@Env{..} St{..} = do
+  let next | isJust introDuration = introing env reticule 0
            | otherwise            = reading env wpm
   mode <- next =<< getCurrentTime
   return St{ .. }
 
-handleEvent :: Environment -> Derived -> State -> BrickEvent Name Event -> EventM Name (Next State)
-handleEvent env der st (VtyEvent (Vty.EvKey k [])) = case Map.lookup k bindings of 
-  Just action -> action env der st
+handleEvent :: Environment -> State -> BrickEvent Name Event -> EventM Name (Next State)
+handleEvent env st (VtyEvent (Vty.EvKey k [])) = case Map.lookup k bindings of 
+  Just action -> action env st
   Nothing     -> continue st
-handleEvent env@Env{..} der@Der{..} st@St{..} (AppEvent Advance{..}) = case mode of 
+handleEvent env@Env{..} st@St{ ..} (AppEvent Advance{..}) = case mode of 
   -- check the source of the event against the current timer to 
   -- make sure it's not leftover from a prior state
   Introing {..} | source == timer -> do
     mode <- if frameNum < lastIntroFrame
-      then introing env der (frameNum + 1) startTime
+      then introing env reticule (frameNum + 1) startTime
       else reading env wpm =<< getCurrentTime
     continue St{..}
   Unpausing {..} | source == timer -> do
@@ -310,10 +328,12 @@ handleEvent env@Env{..} der@Der{..} st@St{..} (AppEvent Advance{..}) = case mode
         mode <- reading env wpm =<< getCurrentTime
         continue St{..}
   _ -> continue st
-handleEvent _env _der st _ev = continue st
+  where Reticule{..} = reticule
+-- TODO: Resize events
+handleEvent _env st _ev = continue st
 
-introing :: MonadIO m => Environment -> Derived -> FrameIndex -> Microseconds -> m Mode
-introing Env{..} Der{..} frameNum startTime  = liftIO $ do
+introing :: MonadIO m => Environment -> Reticule -> FrameIndex -> Microseconds -> m Mode
+introing Env{..} Reticule{..} frameNum startTime  = liftIO $ do
   -- threadDelay only guarantees a minimum delay, other factors
   -- may cause the thread to wait longer.
   --
@@ -337,17 +357,17 @@ unpausing :: MonadIO m => FrameIndex -> Microseconds -> m Mode
 unpausing = undefined
 
 togglePause :: Command
-togglePause _ _ St{..} = case mode of
+togglePause _ St{..} = case mode of
   Paused _ -> do
     mode <- unpausing 0 =<< getCurrentTime
     continue St{..}
   _ -> continue St{ mode = Paused False, .. }
 
 quit :: Command
-quit _ _ = halt
+quit _ = halt
 
 pauseAndToggleHelp :: Command
-pauseAndToggleHelp _ _ St{..} = continue St
+pauseAndToggleHelp _ St{..} = continue St
   { mode = case mode of
       Paused True -> Paused False
       _           -> Paused True
@@ -358,7 +378,7 @@ chain :: Monad m => Int -> (a -> m a) -> a -> m a
 chain n = foldr (>=>) return . replicate n
 
 jumpFiveSeconds :: Direction -> Command
-jumpFiveSeconds dir _env _der st@St{..} = 
+jumpFiveSeconds dir _env st@St{..} = 
   let step = if dir == direction
         then ToNextWord
         else ToPreviousWord
@@ -368,7 +388,7 @@ jumpFiveSeconds dir _env _der st@St{..} =
     Just here -> continue st { here = here }
 
 jumpOneSentence :: Direction -> Command
-jumpOneSentence dir _env _der st@St{..} = 
+jumpOneSentence dir _env st@St{..} = 
   let step = if dir == direction
         then ToNextSentence
         else ToPreviousSentence 
@@ -377,7 +397,7 @@ jumpOneSentence dir _env _der st@St{..} =
     Just here -> continue st { here = here }
 
 jumpOneParagraph :: Direction -> Command
-jumpOneParagraph dir _env _der st@St{..} = 
+jumpOneParagraph dir _env st@St{..} = 
   let step = if dir == direction
         then ToNextParagraph
         else ToPreviousParagraph 
@@ -386,7 +406,7 @@ jumpOneParagraph dir _env _der st@St{..} =
     Just here -> continue st { here = here }
 
 toggleReadingDirection :: Command
-toggleReadingDirection _ _ St{..} = continue St
+toggleReadingDirection _ St{..} = continue St
   { direction = case direction of 
       Forwards -> Backwards
       Backwards -> Forwards
@@ -394,7 +414,7 @@ toggleReadingDirection _ _ St{..} = continue St
   }
 
 pauseAndStepOneWord :: Direction -> Command
-pauseAndStepOneWord dir _env _der St{..} = continue St
+pauseAndStepOneWord dir _env St{..} = continue St
   { mode = case mode of
       Paused _  -> mode 
       _         -> Paused False
@@ -407,13 +427,13 @@ pauseAndStepOneWord dir _env _der St{..} = continue St
           else ToPreviousWord
 
 increaseWPM :: Command
-increaseWPM _env _der st@St{..} = continue st { wpm = wpm + 1 }
+increaseWPM _env st@St{..} = continue st { wpm = wpm + 1 }
 
 decreaseWPM :: Command
-decreaseWPM _env _der st@St{..} = continue st { wpm = wpm - 1 }
+decreaseWPM _env st@St{..} = continue st { wpm = wpm - 1 }
 
 pauseAndChangeProgress :: Command
-pauseAndChangeProgress _env _der st@St{..} = continue st
+pauseAndChangeProgress _env st@St{..} = continue st
   { mode = case mode of
       Paused _  -> mode
       _         -> Paused False
