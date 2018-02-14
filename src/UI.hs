@@ -26,7 +26,9 @@ import qualified Graphics.Vty as Vty
 import System.Clock (getTime, Clock(Monotonic), TimeSpec(..))
 
 import ORP (orp)
-import Cursor (Cursor, move, Increment(..), getWord)
+import Cursor (Cursor, move, Increment(..), getWord, getPosition, getDocument)
+import Document (numParagraphs, numSentences, numWords)
+import Position (Position(..))
 
 -- $setup
 -- >>> import Text.Show.Pretty (pPrint)
@@ -179,8 +181,8 @@ getCurrentTime = liftIO $ do
   return $ 1000*1000*fromIntegral sec + fromIntegral nsec / 1000
 
 draw :: Environment -> State -> [Widget Name]
-draw Env{..} St{..} = return $ case mode of
-  Starting -> emptyWidget
+draw Env{..} St{..} = case mode of
+  Starting -> return emptyWidget
 
   Introing{..} ->
     let framesRemaining = lastIntroFrame - frameNum
@@ -192,7 +194,7 @@ draw Env{..} St{..} = return $ case mode of
         indent = prefixWidth - leftFull - length leftEdge
 
     in
-    drawReticule indent 
+    return $ drawReticule indent 
       [ str leftEdge
       , str $ replicate numFull '█'
       , str rightEdge
@@ -203,7 +205,7 @@ draw Env{..} St{..} = return $ case mode of
         n = orp word
         (pre,Just (c, suf)) = Text.uncons <$> Text.splitAt n word
     in 
-    drawReticule (prefixWidth - n)
+    return $ drawReticule (prefixWidth - n)
       [ withAttr wordPrefix $ txt pre
       , withAttr wordFocus  $ str [c]
       , withAttr wordSuffix $ txt suf
@@ -237,21 +239,73 @@ draw Env{..} St{..} = return $ case mode of
 -}
   Paused{..} -> 
     let (cpre, wpre, wfoc, wsuf, csuf) = context reticule here
+        doc = getDocument here
+        pos@Position{..} = getPosition here
+        absSentenceNum = sentenceNum + sum [numSentences doc p | p <- [0..paragraphNum-1]]
+        absNumSentences = Vector.sum $ Vector.length <$> doc
+        absWordNum = wordNum 
+          + sum [numWords doc paragraphNum s | s <- [0..sentenceNum-1]]
+          + sum [numWords doc p s | p <- [0..paragraphNum-1], s <- [0..numSentences doc p - 1]]
+        absNumWords = Vector.sum $ (Vector.sum . fmap Vector.length) <$> doc
+
+        percent :: Int
+        percent = round (100 * fromIntegral absWordNum / fromIntegral absNumWords :: Double)
+
+        (estHours, estMinutes, estSeconds) = toTime absWordNum
+        (totHours, totMinutes, totSeconds) = toTime absNumWords
+
+        toTime :: Int -> (Int,Int,Int)
+        toTime n = (h,m,s) where
+          hms = round $ 60 * fromIntegral n / wpm
+          (hm,s) = hms `quotRem` 60
+          (h,m)  = hm `quotRem` 60
+
+        prog = case progress of
+          FractionParagraphs -> concat
+            [ show paragraphNum 
+            , "/"
+            , show $ numParagraphs doc
+            , " paragraphs"
+            ]
+          FractionSentences -> concat
+            [ show absSentenceNum
+            , "/"
+            , show $ absNumSentences
+            , " sentences"
+            ]
+          FractionWords -> concat
+            [ show absWordNum
+            , "/"
+            , show $ absNumWords
+            , " words"
+            ]
+          Percentage -> concat [ show percent, "%" ]
+          FractionTime -> concat
+            [ show estHours, ":", tshow estMinutes, ":", tshow estSeconds
+            , "/"
+            , show totHours, ":", tshow totMinutes, ":", tshow totSeconds
+            ]
+
+        tshow n | n < 10 = '0' : show n
+                | otherwise = show n
     in
-    vBox
-      [ drawReticule (prefixWidth - Text.length cpre - Text.length wpre)
-          [ withAttr contextPrefix $ txt cpre
-          , withAttr wordPrefix $ txt wpre
-          , withAttr wordFocus $ str [wfoc]
-          , withAttr wordSuffix $ txt wsuf
-          , withAttr contextSuffix $ txt csuf
-          ]
-      , hBox
-        [ str "left"
-        , hCenter $ str "center"
-        , str "right"
+    [ drawReticule (prefixWidth - Text.length cpre - Text.length wpre)
+        [ withAttr contextPrefix $ txt cpre
+        , withAttr wordPrefix $ txt wpre
+        , withAttr wordFocus $ str [wfoc]
+        , withAttr wordSuffix $ txt wsuf
+        , withAttr contextSuffix $ txt csuf
         ]
-      ]
+    , translateBy (Location (0,3)) $ hBox
+        [ str $ show (round wpm :: Int)
+        , str "wpm"
+        ]
+    , translateBy (Location (60,3)) $ str $ show pos
+    , padTop (Pad 3) $ hCenter $ str prog
+    , if showHelp
+        then padTop (Pad 4) $ str "help"
+        else emptyWidget
+    ]
 
   Unpausing{..} -> undefined
     -- cropLeftBy / cropRightBy
@@ -286,7 +340,7 @@ introLeftEdges, introRightEdges :: Vector String
 introLeftEdges   = Vector.fromList $ "" : map return "▕▐" 
 introRightEdges  = Vector.fromList $ "" : map return "▏▎▍▌▋▊▉"
 
--- Use variables rather than literals to protect against typos
+-- Use variables, rather than literals, to protect against typos
 wordPrefix, wordFocus, wordSuffix, contextPrefix, contextSuffix :: AttrName
 wordPrefix  = "wordPrefix"
 wordFocus   = "wordFocus"
@@ -382,7 +436,7 @@ jumpFiveSeconds dir _env st@St{..} =
   let step = if dir == direction
         then ToNextWord
         else ToPreviousWord
-      numSteps = min 1 $ round (wpm/12)
+      numSteps = max 1 $ round (wpm/12)
   in case chain numSteps (move step) here of
     Nothing -> halt st
     Just here -> continue st { here = here }

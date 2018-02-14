@@ -42,7 +42,7 @@ main = do
         , unpauseDuration = if skipIntro then Nothing else Just 5e6
         , events          = events
         , attributes      = Brick.attrMap Vty.defAttr 
-                              [ (wordFocus, Brick.fg Vty.red)
+                              [ (wordFocus, Brick.fg Vty.yellow)
                               , (contextPrefix, Brick.fg Vty.cyan)
                               , (contextSuffix, Brick.fg Vty.cyan)
                               ]
