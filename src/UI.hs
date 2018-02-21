@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE GADTs #-}
@@ -11,6 +12,7 @@ import Control.Monad ((>=>))
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Function (fix)
 import Data.Maybe (isJust, fromMaybe)
+import Data.List (intercalate)
 import Data.Semigroup ((<>))
 
 import Brick hiding (Direction)
@@ -66,25 +68,24 @@ data Progress
   | FractionParagraphs
   | FractionSentences
   | FractionWords
+  deriving Enum
 
 -- | derived from the environment parameters
 --   and the rendering context
 data Reticule = Reticule
-  { prefixWidth                 :: !Columns
-  , suffixWidth                 :: !Columns
-  , lastIntroFrame              :: !FrameIndex
-  , introFramesPerMicrosecond   :: !Double
-  , lastUnpauseFrame            :: FrameIndex -- TODO: make strict
-  , unpauseFramesPerMicrosecond :: Double -- TODO: make strict
+  { prefixWidth  :: !Columns
+  , suffixWidth  :: !Columns
   , drawReticule :: !(Columns -> [Widget Name] -> Widget Name)
   }
 
 data Mode 
   = Starting
   | Introing
-    { timer     :: !ThreadId
-    , frameNum  :: !FrameIndex
-    , startTime :: !Microseconds
+    { timer                 :: !ThreadId
+    , frameNum              :: !FrameIndex
+    , startTime             :: !Microseconds
+    , framesPerMicrosecond  :: !Double
+    , lastFrame             :: !FrameIndex
     }
   | Reading
     { timer     :: !ThreadId
@@ -94,9 +95,11 @@ data Mode
     { showHelp  :: !Bool
     }
   | Unpausing
-    { timer     :: !ThreadId
-    , frameNum  :: !FrameIndex
-    , startTime :: !Microseconds
+    { timer                 :: !ThreadId
+    , frameNum              :: !FrameIndex
+    , startTime             :: !Microseconds
+    , framesPerMicrosecond  :: !Double
+    , lastFrame             :: !FrameIndex
     }
 
 newtype Event
@@ -121,13 +124,9 @@ makeApp env = App
   }
 
 makeReticule :: Environment -> Columns -> Reticule
-makeReticule Env{..} reticuleWidth = Reticule {..} where
+makeReticule Env{..} reticuleWidth = Reticule{..} where
   prefixWidth = orp (Text.replicate reticuleWidth "X")
   suffixWidth = reticuleWidth - 1 - prefixWidth
-  lastIntroFrame = lcm (prefixWidth * numLeftEdges) (suffixWidth * numRightEdges)
-  introFramesPerMicrosecond = fromIntegral lastIntroFrame  / fromMaybe 0 introDuration
-  lastUnpauseFrame          = undefined
-  unpauseFramesPerMicrosecond = undefined
   reticuleTop     = reticuleLine '┬'
   reticuleBottom  = reticuleLine '┴'
   reticuleLine c = replicate prefixWidth '─' ++ c : replicate suffixWidth '─'
@@ -169,7 +168,11 @@ usage =
   , ("go forwards one word and pause", [(Vty.KRight, pauseAndStepOneWord Forwards)])
   , ("increase wpm", [(Vty.KUp, increaseWPM)])
   , ("decrease wpm", [(Vty.KDown, decreaseWPM)])
-  , ("pause and change progress display", [(Vty.KChar '\t', pauseAndChangeProgress)])
+  , ("pause and change progress display"
+    , [ (Vty.KChar '\t', pauseAndChangeProgress Forwards)
+      , (Vty.KBackTab, pauseAndChangeProgress Backwards)
+      ]
+    )
   ]
 
 bindings :: Map Vty.Key Command
@@ -182,17 +185,17 @@ getCurrentTime = liftIO $ do
 
 draw :: Environment -> State -> [Widget Name]
 draw Env{..} St{..} = case mode of
-  Starting -> return emptyWidget
+  Starting ->
+    return emptyWidget
 
   Introing{..} ->
-    let framesRemaining = lastIntroFrame - frameNum
-        (leftFull, leftPartial)   = (prefixWidth * framesRemaining) `quotRem` lastIntroFrame
-        (rightFull, rightPartial) = (suffixWidth * framesRemaining) `quotRem` lastIntroFrame
+    let framesRemaining = lastFrame - frameNum
+        (leftFull, leftPartial)   = (prefixWidth * framesRemaining) `quotRem` lastFrame
+        (rightFull, rightPartial) = (suffixWidth * framesRemaining) `quotRem` lastFrame
         numFull = leftFull + 1 + rightFull
-        leftEdge  = introLeftEdges ! quot (numLeftEdges * leftPartial) lastIntroFrame
-        rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) lastIntroFrame
+        leftEdge  = introLeftEdges ! quot (numLeftEdges * leftPartial) lastFrame
+        rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) lastFrame
         indent = prefixWidth - leftFull - length leftEdge
-
     in
     return $ drawReticule indent 
       [ str leftEdge
@@ -211,7 +214,7 @@ draw Env{..} St{..} = case mode of
       , withAttr wordSuffix $ txt suf
       ] 
 
-{-
+  {-
     ────────────────────┬───────────────────────────────────────────────────────────
     …umphantly.  Alice did not quite know what to say to this: so she helped hersel…
     ────────────────────┴───────────────────────────────────────────────────────────
@@ -236,7 +239,7 @@ draw Env{..} St{..} = case mode of
     …umphantly.  Alice did not quite know what to say to this: so she helped hersel…
     ────────────────────┴───────────────────────────────────────────────────────────
     250wpm                         15073/29465 words                         403.0.1
--}
+  -}
   Paused{..} -> 
     let (cpre, wpre, wfoc, wsuf, csuf) = context reticule here
         doc = getDocument here
@@ -260,57 +263,88 @@ draw Env{..} St{..} = case mode of
           (hm,s) = hms `quotRem` 60
           (h,m)  = hm `quotRem` 60
 
-        prog = case progress of
-          FractionParagraphs -> concat
-            [ show paragraphNum 
-            , "/"
-            , show $ numParagraphs doc
-            , " paragraphs"
-            ]
-          FractionSentences -> concat
-            [ show absSentenceNum
-            , "/"
-            , show $ absNumSentences
-            , " sentences"
-            ]
-          FractionWords -> concat
-            [ show absWordNum
-            , "/"
-            , show $ absNumWords
-            , " words"
-            ]
-          Percentage -> concat [ show percent, "%" ]
-          FractionTime -> concat
-            [ show estHours, ":", tshow estMinutes, ":", tshow estSeconds
-            , "/"
-            , show totHours, ":", tshow totMinutes, ":", tshow totSeconds
-            ]
-
         tshow n | n < 10 = '0' : show n
                 | otherwise = show n
+
+        spos = show pos
+        indent = prefixWidth + 1 + suffixWidth - length spos
+
     in
     [ drawReticule (prefixWidth - Text.length cpre - Text.length wpre)
-        [ withAttr contextPrefix $ txt cpre
-        , withAttr wordPrefix $ txt wpre
-        , withAttr wordFocus $ str [wfoc]
-        , withAttr wordSuffix $ txt wsuf
-        , withAttr contextSuffix $ txt csuf
-        ]
+      [ withAttr contextPrefix $ txt cpre
+      , withAttr wordPrefix $ txt wpre
+      , withAttr wordFocus $ str [wfoc]
+      , withAttr wordSuffix $ txt wsuf
+      , withAttr contextSuffix $ txt csuf
+      ]
     , translateBy (Location (0,3)) $ hBox
-        [ str $ show (round wpm :: Int)
-        , str "wpm"
+      [ str $ show (round wpm :: Int)
+      , str "wpm"
+      ]
+    , translateBy (Location (indent,3)) $ str spos
+    , padTop (Pad 3) $ hCenter $ str $ case progress of
+      FractionParagraphs -> concat
+        [ show paragraphNum 
+        , "/"
+        , show $ numParagraphs doc
+        , " paragraphs"
         ]
-    , translateBy (Location (60,3)) $ str $ show pos
-    , padTop (Pad 3) $ hCenter $ str prog
+      FractionSentences -> concat
+        [ show absSentenceNum
+        , "/"
+        , show $ absNumSentences
+        , " sentences"
+        ]
+      FractionWords -> concat
+        [ show absWordNum
+        , "/"
+        , show $ absNumWords
+        , " words"
+        ]
+      Percentage -> concat [ show percent, "%" ]
+      FractionTime -> concat
+        [ show estHours, ":", tshow estMinutes, ":", tshow estSeconds
+        , "/"
+        , show totHours, ":", tshow totMinutes, ":", tshow totSeconds
+        ]
     , if showHelp
-        then padTop (Pad 4) $ str "help"
+        then padTop (Pad 5) $ hBox $ padLeft (Pad 4) <$>
+          [ vBox [ str keys | (_, unzip -> (showKeys -> keys, _)) <- usage ]
+          , vBox [ str helpMsg | (helpMsg, _) <- usage ]
+          ]
         else emptyWidget
     ]
 
-  Unpausing{..} -> undefined
+  Unpausing{..} -> 
+    let (cpre, wpre, wfoc, wsuf, csuf) = context reticule here
+        framesRemaining = lastFrame - frameNum
+        leftFull = ((prefixWidth - Text.length wpre) * framesRemaining) `quot` lastFrame
+        rightFull = ((suffixWidth - Text.length wsuf) * framesRemaining) `quot` lastFrame
+    in
+    [ drawReticule (prefixWidth - leftFull - Text.length wpre)
+      [ withAttr contextPrefix . txt $ Text.takeEnd leftFull cpre
+      , withAttr wordPrefix $ txt wpre
+      , withAttr wordFocus $ str [wfoc]
+      , withAttr wordSuffix $ txt wsuf
+      , withAttr contextSuffix . txt $ Text.take rightFull csuf
+      ]
+    ]
     -- cropLeftBy / cropRightBy
 
   where Reticule{..} = reticule
+
+showKeys :: [Vty.Key] -> String
+showKeys = intercalate "/" . fmap showKey where
+  showKey k = case k of
+    Vty.KChar ' '   -> "<Space>"
+    Vty.KChar '\t'  -> "<Tab>"
+    Vty.KBackTab    -> "<S-Tab>"
+    Vty.KUp         -> "<Up>"
+    Vty.KDown       -> "<Down>"
+    Vty.KLeft       -> "<Left>"
+    Vty.KRight      -> "<Right>"
+    Vty.KChar c     -> [c]
+    _               -> show k
 
 context :: Reticule -> Cursor -> (Text, Text, Char, Text, Text)
 context Reticule{..} here = (cpre, wpre, wfoc, wsuf, csuf) where
@@ -349,30 +383,41 @@ contextPrefix = "contextPrefix"
 contextSuffix = "contextSuffix"
 
 cueStart :: Environment -> State -> EventM Name State 
-cueStart env@Env{..} St{..} = do
-  let next | isJust introDuration = introing env reticule 0
+cueStart env@Env{..} st@St{..} = do
+  let next | isJust introDuration = startIntro env st
            | otherwise            = reading env wpm
   mode <- next =<< getCurrentTime
   return St{ .. }
 
 handleEvent :: Environment -> State -> BrickEvent Name Event -> EventM Name (Next State)
-handleEvent env st (VtyEvent (Vty.EvKey k [])) = case Map.lookup k bindings of 
-  Just action -> action env st
-  Nothing     -> continue st
 handleEvent env@Env{..} st@St{ ..} (AppEvent Advance{..}) = case mode of 
   -- check the source of the event against the current timer to 
   -- make sure it's not leftover from a prior state
-  Introing {..} | source == timer -> do
-    mode <- if frameNum < lastIntroFrame
-      then introing env reticule (frameNum + 1) startTime
-      else reading env wpm =<< getCurrentTime
+  Introing{..} | source == timer -> do
+    -- threadDelay only guarantees a minimum delay, other factors
+    -- may cause the thread to wait longer, so see which frame 
+    -- we should be on now.
+    currTime <- getCurrentTime
+    let frameNum = round $ (currTime - startTime) * framesPerMicrosecond
+    mode <- if frameNum <= lastFrame
+      then do
+        timer <- setTimer env (1 / framesPerMicrosecond)
+        return Introing{..}
+      else reading env wpm currTime
     continue St{..}
-  Unpausing {..} | source == timer -> do
-    mode <- if frameNum < lastUnpauseFrame
-      then unpausing (frameNum + 1) startTime
-      else reading env wpm =<< getCurrentTime
+  Unpausing{..} | source == timer -> do
+    -- threadDelay only guarantees a minimum delay, other factors
+    -- may cause the thread to wait longer, so see which frame 
+    -- we should be on now.
+    currTime <- getCurrentTime
+    let frameNum = round $ (currTime - startTime) * framesPerMicrosecond
+    mode <- if frameNum < lastFrame
+      then do
+        timer <- setTimer env (1 / framesPerMicrosecond)
+        return Unpausing{..}
+      else reading env wpm currTime
     continue St{..}
-  Reading {..} | source == timer ->
+  Reading{..} | source == timer ->
     let step = case direction of 
           Forwards  -> ToNextWord
           Backwards -> ToPreviousWord
@@ -382,38 +427,57 @@ handleEvent env@Env{..} st@St{ ..} (AppEvent Advance{..}) = case mode of
         mode <- reading env wpm =<< getCurrentTime
         continue St{..}
   _ -> continue st
-  where Reticule{..} = reticule
--- TODO: Resize events
+handleEvent env st (VtyEvent ev) = case ev of
+  Vty.EvLostFocus -> continue st { mode=Paused{showHelp=False} }
+  Vty.EvResize cols _rows -> continue st { reticule=makeReticule env cols }
+  Vty.EvKey (flip Map.lookup bindings -> Just action) [] -> action env st
+  _ -> continue st
 handleEvent _env st _ev = continue st
 
-introing :: MonadIO m => Environment -> Reticule -> FrameIndex -> Microseconds -> m Mode
-introing Env{..} Reticule{..} frameNum startTime  = liftIO $ do
-  -- threadDelay only guarantees a minimum delay, other factors
-  -- may cause the thread to wait longer.
-  --
-  -- To avoid having the intro run beyond the desired introDuration, 
-  -- find out when the next frame *should* start, and only wait until then
-  let nextTime = startTime + (fromIntegral frameNum / introFramesPerMicrosecond)
-  timer <- forkIO $ do
-    currTime <- getCurrentTime
-    threadDelay $ round (nextTime - currTime)
-    writeBChan events . Advance =<< myThreadId
-  return Introing { .. }
+setTimer :: MonadIO m => Environment -> Microseconds -> m ThreadId
+setTimer Env{..} ms = liftIO . forkIO $ do
+  threadDelay $ round ms
+  writeBChan events . Advance =<< myThreadId
+
+startIntro :: MonadIO m => Environment -> State -> Microseconds -> m Mode
+startIntro env@Env{..} St{..} startTime  = do
+  let Reticule{..} = reticule
+      lastFrame = lcm (prefixWidth * numLeftEdges) (suffixWidth * numRightEdges)
+      framesPerMicrosecond = fromIntegral lastFrame  / fromMaybe 0 introDuration
+  timer <- setTimer env (1 / framesPerMicrosecond)
+  return Introing { frameNum = 0, .. }
 
 reading :: MonadIO m => Environment -> WPM -> Microseconds -> m Mode
 reading Env{..} wpm lastMove = do
   timer <- liftIO . forkIO $ do
     threadDelay $ round (60e6 / wpm)
     writeBChan events . Advance =<< myThreadId
-  return Reading { .. }
+  return Reading{ .. }
 
-unpausing :: MonadIO m => FrameIndex -> Microseconds -> m Mode
-unpausing = undefined
+unpausing :: MonadIO m => Environment -> State -> FrameIndex -> Microseconds -> m Mode
+unpausing Env{..} St{..} frameNum startTime = liftIO $ do
+  -- threadDelay only guarantees a minimum delay, other factors
+  -- may cause the thread to wait longer.
+  --
+  -- To avoid having the unpause run beyond the desired unpauseDuration, 
+  -- find out when the next frame *should* start, and only wait until then
+  let Reticule{..} = reticule
+      nextTime = startTime + (fromIntegral frameNum / framesPerMicrosecond)
+      w = getWord here
+      n = orp w
+      n' = Text.length w - 1 - n
+      lastFrame = lcm (prefixWidth - n) (suffixWidth - n')
+      framesPerMicrosecond = fromIntegral lastFrame / fromMaybe 0 unpauseDuration
+  timer <- forkIO $ do
+    currTime <- getCurrentTime
+    threadDelay $ round (nextTime - currTime)
+    writeBChan events . Advance =<< myThreadId
+  return Unpausing{..}
 
 togglePause :: Command
-togglePause _ St{..} = case mode of
+togglePause env st@St{..} = case mode of
   Paused _ -> do
-    mode <- unpausing 0 =<< getCurrentTime
+    mode <- unpausing env st 0 =<< getCurrentTime
     continue St{..}
   _ -> continue St{ mode = Paused False, .. }
 
@@ -439,8 +503,9 @@ jumpFiveSeconds dir _env st@St{..} =
       numSteps = max 1 $ round (wpm/12)
   in case chain numSteps (move step) here of
     Nothing -> halt st
-    Just here -> continue st { here = here }
+    Just here -> continue st{ here = here }
 
+-- TODO: also shift Starting -> Paused
 jumpOneSentence :: Direction -> Command
 jumpOneSentence dir _env st@St{..} = 
   let step = if dir == direction
@@ -448,7 +513,7 @@ jumpOneSentence dir _env st@St{..} =
         else ToPreviousSentence 
   in case move step here of
     Nothing -> halt st
-    Just here -> continue st { here = here }
+    Just here -> continue st{ here = here }
 
 jumpOneParagraph :: Direction -> Command
 jumpOneParagraph dir _env st@St{..} = 
@@ -457,7 +522,7 @@ jumpOneParagraph dir _env st@St{..} =
         else ToPreviousParagraph 
   in case move step here of
     Nothing -> halt st
-    Just here -> continue st { here = here }
+    Just here -> continue st{ here = here }
 
 toggleReadingDirection :: Command
 toggleReadingDirection _ St{..} = continue St
@@ -481,20 +546,17 @@ pauseAndStepOneWord dir _env St{..} = continue St
           else ToPreviousWord
 
 increaseWPM :: Command
-increaseWPM _env st@St{..} = continue st { wpm = wpm + 1 }
+increaseWPM _env st@St{..} = continue st{ wpm = wpm + 1 }
 
 decreaseWPM :: Command
-decreaseWPM _env st@St{..} = continue st { wpm = wpm - 1 }
+decreaseWPM _env st@St{..} = continue st{ wpm = wpm - 1 }
 
-pauseAndChangeProgress :: Command
-pauseAndChangeProgress _env st@St{..} = continue st
+pauseAndChangeProgress :: Direction -> Command
+pauseAndChangeProgress dir _env st@St{..} = continue st
   { mode = case mode of
       Paused _  -> mode
       _         -> Paused False
-  , progress = case progress of
-      Percentage          -> FractionTime
-      FractionTime        -> FractionParagraphs
-      FractionParagraphs  -> FractionSentences
-      FractionSentences   -> FractionWords
-      FractionWords       -> Percentage
+  , progress = if dir == Forwards
+      then case progress of { FractionWords -> Percentage ; _ -> succ progress }
+      else case progress of { Percentage -> FractionWords ; _ -> pred progress }
   }

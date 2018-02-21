@@ -38,8 +38,8 @@ main = do
   (numCols, _numRows) <- Vty.displayBounds $ Vty.outputIface vty
 
   let env = Env
-        { introDuration   = if skipIntro then Nothing else Just 5e6
-        , unpauseDuration = if skipIntro then Nothing else Just 5e6
+        { introDuration   = if skipIntro then Nothing else Just 3e6
+        , unpauseDuration = if skipIntro then Nothing else Just 1e6
         , events          = events
         , attributes      = Brick.attrMap Vty.defAttr 
                               [ (wordFocus, Brick.fg Vty.yellow)
@@ -63,4 +63,3 @@ main = do
   putStrLn ""
   putStrLn ""
   -- TODO: print final position?
-
