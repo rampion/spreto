@@ -18,6 +18,7 @@ import Data.Semigroup ((<>))
 import Brick hiding (Direction)
 import Brick.BChan (BChan, writeBChan)
 import Brick.Widgets.Center (hCenter)
+import Brick.Widgets.Core (textWidth)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Text (Text)
@@ -25,6 +26,7 @@ import qualified Data.Text as Text
 import Data.Vector ((!), Vector)
 import qualified Data.Vector as Vector
 import qualified Graphics.Vty as Vty
+import Graphics.Text.Width (wcswidth, wcwidth)
 import System.Clock (getTime, Clock(Monotonic), TimeSpec(..))
 
 import ORP (orp)
@@ -195,7 +197,7 @@ draw Env{..} St{..} = case mode of
         numFull = leftFull + 1 + rightFull
         leftEdge  = introLeftEdges ! quot (numLeftEdges * leftPartial) lastFrame
         rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) lastFrame
-        indent = prefixWidth - leftFull - length leftEdge
+        indent = prefixWidth - leftFull - wcswidth leftEdge
     in
     return $ drawReticule indent 
       [ str leftEdge
@@ -267,10 +269,10 @@ draw Env{..} St{..} = case mode of
                 | otherwise = show n
 
         spos = show pos
-        indent = prefixWidth + 1 + suffixWidth - length spos
-
+        reticuleWidth = prefixWidth + 1 + suffixWidth
+        rightJustify = reticuleWidth - wcswidth spos
     in
-    [ drawReticule (prefixWidth - Text.length cpre - Text.length wpre)
+    [ drawReticule (prefixWidth - textWidth cpre - textWidth wpre)
       [ withAttr contextPrefix $ txt cpre
       , withAttr wordPrefix $ txt wpre
       , withAttr wordFocus $ str [wfoc]
@@ -281,7 +283,7 @@ draw Env{..} St{..} = case mode of
       [ str $ show (round wpm :: Int)
       , str "wpm"
       ]
-    , translateBy (Location (indent,3)) $ str spos
+    , translateBy (Location (rightJustify,3)) $ str spos
     , padTop (Pad 3) $ hCenter $ str $ case progress of
       FractionParagraphs -> concat
         [ show paragraphNum 
@@ -315,13 +317,26 @@ draw Env{..} St{..} = case mode of
         else emptyWidget
     ]
 
+  -- TODO: test with multi-width characters
+  --
+  --  aeioucsz
+  --  áéíóúčšž
+  --  台北1234    (leading characters should be 2 spaces each)
+  --  abcdefgh
+  --  ＱＲＳ12    (fullwidth latin; should be 2 spaces each)
+  --  abcdefgh
+  --  ｱｲｳ12345    (halfwidth kana; should be 1 space each)
+  --  abcdefgh
+  --
+  --  https://denisbider.blogspot.com/2015/09/when-monospace-fonts-arent-unicode.html
+
   Unpausing{..} -> 
     let (cpre, wpre, wfoc, wsuf, csuf) = context reticule here
         framesRemaining = lastFrame - frameNum
-        leftFull = ((prefixWidth - Text.length wpre) * framesRemaining) `quot` lastFrame
-        rightFull = ((suffixWidth - Text.length wsuf) * framesRemaining) `quot` lastFrame
+        leftFull = ((prefixWidth - textWidth wpre) * framesRemaining) `quot` lastFrame
+        rightFull = ((suffixWidth - textWidth wsuf) * framesRemaining) `quot` lastFrame
     in
-    [ drawReticule (prefixWidth - leftFull - Text.length wpre)
+    [ drawReticule (prefixWidth - leftFull - textWidth wpre)
       [ withAttr contextPrefix . txt $ Text.takeEnd leftFull cpre
       , withAttr wordPrefix $ txt wpre
       , withAttr wordFocus $ str [wfoc]
@@ -351,18 +366,19 @@ context Reticule{..} here = (cpre, wpre, wfoc, wsuf, csuf) where
   word = getWord here
   n = orp word
   (wpre,Just (wfoc, wsuf)) = Text.uncons <$> Text.splitAt n word
-  cpreWidth = prefixWidth - Text.length wpre
-  csufWidth = suffixWidth - Text.length wsuf
+  cpreWidth = prefixWidth - textWidth wpre
+  csufWidth = suffixWidth - textWidth wsuf + 1 - wcwidth wfoc
+  ellipsis = "…"
   
   cpre = flip fix ("", move ToPreviousWord here) $ \loop (cpre, moved) -> 
-    case (Text.length cpre `compare` cpreWidth, moved) of
-      (GT, _)         -> "…" <> Text.takeEnd (cpreWidth - 1) cpre
+    case (textWidth cpre `compare` cpreWidth, moved) of
+      (GT, _)         -> ellipsis <> Text.takeEnd (cpreWidth - textWidth ellipsis) cpre
       (_, Just here)  -> loop (getWord here <> " " <> cpre, move ToPreviousWord here)
       _               -> cpre
 
   csuf = flip fix ("", move ToNextWord here) $ \loop (csuf, moved) ->
-    case (Text.length csuf `compare` csufWidth, moved) of
-      (GT, _)         -> Text.take (csufWidth - 1) csuf <> "…"
+    case (textWidth csuf `compare` csufWidth, moved) of
+      (GT, _)         -> Text.take (csufWidth - textWidth ellipsis) csuf <> ellipsis
       (_, Just here)  -> loop (csuf <> " " <> getWord here, move ToNextWord here)
       _               -> csuf
 
@@ -465,7 +481,7 @@ unpausing Env{..} St{..} frameNum startTime = liftIO $ do
       nextTime = startTime + (fromIntegral frameNum / framesPerMicrosecond)
       w = getWord here
       n = orp w
-      n' = Text.length w - 1 - n
+      n' = textWidth w - wcwidth (w `Text.index` n) - n
       lastFrame = lcm (prefixWidth - n) (suffixWidth - n')
       framesPerMicrosecond = fromIntegral lastFrame / fromMaybe 0 unpauseDuration
   timer <- forkIO $ do
@@ -505,7 +521,6 @@ jumpFiveSeconds dir _env st@St{..} =
     Nothing -> halt st
     Just here -> continue st{ here = here }
 
--- TODO: also shift Starting -> Paused
 jumpOneSentence :: Direction -> Command
 jumpOneSentence dir _env st@St{..} = 
   let step = if dir == direction
