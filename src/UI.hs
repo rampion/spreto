@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE KindSignatures #-}
@@ -10,13 +11,14 @@ module UI where
 import Control.Concurrent (ThreadId, myThreadId, forkIO, threadDelay)
 import Control.Monad ((>=>))
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.State.Strict (state, runState, MonadState)
 import Data.Function (fix)
 import Data.Maybe (isJust, fromMaybe)
 import Data.List (intercalate)
 import Data.Semigroup ((<>))
 
 import Brick hiding (Direction)
-import Brick.BChan (BChan, writeBChan)
+import Brick.BChan (BChan, writeBChan, newBChan)
 import Brick.Widgets.Center (hCenter)
 import Brick.Widgets.Core (textWidth)
 import Data.Map (Map)
@@ -29,34 +31,45 @@ import qualified Graphics.Vty as Vty
 import Graphics.Text.Width (wcswidth, wcwidth)
 import System.Clock (getTime, Clock(Monotonic), TimeSpec(..))
 
-import ORP (orp)
+import ORP (orp, getWordORP, splitWidth, rsplitWidth)
 import Cursor (Cursor, move, Increment(..), getWord, getPosition, getDocument)
-import Document (numParagraphs, numSentences, numWords)
 import Position (Position(..))
 
--- $setup
--- >>> import Text.Show.Pretty (pPrint)
--- >>> :set -interactive-print pPrint -XOverloadedStrings
 type Microseconds = Double
 type WPM = Double
 type FrameIndex = Int
 type Columns = Int
 
--- | environment parameters given by the user
+data Configuration = Config
+  { uiIntroDuration     :: !(Maybe Microseconds)
+  , uiUnpauseDuration   :: !(Maybe Microseconds)
+  , uiAttributes        :: !AttrMap
+  , uiWPM               :: !WPM
+  , uiReadingDirection  :: !Direction
+  , uiProgressDisplay   :: !ProgressDisplay
+  }
+
 data Environment = Env
-  { introDuration   :: Maybe Microseconds
-  , unpauseDuration :: Maybe Microseconds
-  , events          :: BChan Event
-  , attributes      :: AttrMap
+  { introDuration     :: !(Maybe Microseconds)
+  , unpauseDuration   :: !(Maybe Microseconds)
+  , attributes        :: !AttrMap
+  , events            :: !(BChan Event)
+  , absNumParagraphs  :: !Int
+  , absNumSentences   :: !Int
+  , absNumWords       :: !Int
+  , sentenceOffset    :: !(Vector Int)
+  , wordOffset        :: !(Vector (Vector Int))
   }
 
 data State = St
-  { wpm           :: !WPM       -- ^ rate at which to show words
-  , direction     :: !Direction -- ^ reading forwards or backwards
-  , here          :: !Cursor    -- ^ current position in the text
-  , progress      :: !Progress  -- ^ how to show progress when paused
-  , reticule      :: !Reticule
-  , mode          :: !Mode
+  { wpm             :: !WPM             -- ^ rate at which to show words
+  , direction       :: !Direction       -- ^ reading forwards or backwards
+  , progressDisplay :: !ProgressDisplay -- ^ how to show progress when paused
+  , here            :: !Cursor          -- ^ current position in the text
+  , reticuleWidth   :: !Columns
+  , prefixWidth     :: !Columns
+  , suffixWidth     :: !Columns
+  , mode            :: !Mode
   }
 
 data Direction
@@ -64,21 +77,13 @@ data Direction
   | Backwards
   deriving (Eq)
 
-data Progress
+data ProgressDisplay
   = Percentage
   | FractionTime
   | FractionParagraphs
   | FractionSentences
   | FractionWords
   deriving Enum
-
--- | derived from the environment parameters
---   and the rendering context
-data Reticule = Reticule
-  { prefixWidth  :: !Columns
-  , suffixWidth  :: !Columns
-  , drawReticule :: !(Columns -> [Widget Name] -> Widget Name)
-  }
 
 data Mode 
   = Starting
@@ -107,40 +112,63 @@ data Mode
 newtype Event
   = Advance { source :: ThreadId }
 
--- | Named Resources
---
--- Not currently used, but will be easier to refactor
--- if we call this "Name" now.
 data Name = Name deriving (Eq, Ord)
 
 type Command = Environment -> State -> EventM Name (Next State)
 type Binding = (Vty.Key, Command)
 
-makeApp :: Environment -> App State Event Name
-makeApp env = App
-  { appDraw         = draw env
-  , appChooseCursor = neverShowCursor
-  , appHandleEvent  = handleEvent env
-  , appStartEvent   = cueStart env
-  , appAttrMap      = const (attributes env)
-  }
+offsets :: MonadState Int m => Vector Int -> m (Vector Int)
+offsets = traverse $ \a -> state $ \s -> (s, a+s)
 
-makeReticule :: Environment -> Columns -> Reticule
-makeReticule Env{..} reticuleWidth = Reticule{..} where
-  prefixWidth = orp (Text.replicate reticuleWidth "X")
-  suffixWidth = reticuleWidth - 1 - prefixWidth
-  reticuleTop     = reticuleLine '┬'
-  reticuleBottom  = reticuleLine '┴'
-  reticuleLine c = replicate prefixWidth '─' ++ c : replicate suffixWidth '─'
+runUI :: Cursor -> Configuration -> IO State
+runUI here Config{..} = do
+  events <- newBChan 10 -- Q: why 10? A: stolen from the example
 
-  drawReticule n xs = vBox
-    [ str reticuleTop
-    , padLeft (Pad n) (hBox xs)
-    , str reticuleBottom
-    ]
+  vty <- Vty.mkVty Vty.defaultConfig
+  (reticuleWidth, _numRows) <- Vty.displayBounds $ Vty.outputIface vty
+      
+  let doc = getDocument here
+      (wordOffset, absNumWords) = traverse offsets (fmap Vector.length <$> doc) `runState` 0
+      (sentenceOffset, absNumSentences) = offsets (Vector.length <$> doc) `runState` 0
+      absNumParagraphs = Vector.length doc
 
-usage :: [(String, [Binding])]
-usage = 
+      prefixWidth = orp (Text.replicate reticuleWidth "X")
+      suffixWidth = reticuleWidth - 1 - prefixWidth
+
+      env = Env
+        { introDuration   = uiIntroDuration
+        , unpauseDuration = uiUnpauseDuration
+        , events          = events
+        , attributes      = uiAttributes
+        , ..
+        }
+
+  -- XXX: takes over the entire display, which is non-optimal
+  --      see https://github.com/jtdaugherty/vty/issues/143
+  Brick.customMain (return vty) (Just events)
+    App { appDraw         = draw env
+        , appChooseCursor = neverShowCursor
+        , appHandleEvent  = handleEvent env
+        , appStartEvent   = cueStart env
+        , appAttrMap      = const (attributes env)
+        }
+    St  { wpm             = uiWPM
+        , direction       = uiReadingDirection
+        , progressDisplay = uiProgressDisplay
+        , mode            = Starting
+        , ..
+        }
+
+drawReticule :: State -> Columns -> [Widget Name] -> Widget Name
+drawReticule St{..} indent xs = vBox
+  [ str $ reticuleLine '┬'
+  , padLeft (Pad indent) (hBox xs)
+  , str $ reticuleLine '┴'
+  ]
+  where reticuleLine c = replicate prefixWidth '─' ++ c : replicate suffixWidth '─'
+
+bindingsHelp :: [(String, [Binding])]
+bindingsHelp = 
   [ ("pause/unpause", [(Vty.KChar ' ', togglePause)]) 
   , ("quit", [(Vty.KChar 'q', quit)])
   , ("pause and toggle the help menu"
@@ -178,34 +206,15 @@ usage =
   ]
 
 bindings :: Map Vty.Key Command
-bindings = Map.fromList $ snd =<< usage
+bindings = Map.fromList $ snd =<< bindingsHelp
 
 getCurrentTime :: MonadIO m => m Microseconds
 getCurrentTime = liftIO $ do
   TimeSpec{..} <- getTime Monotonic
   return $ 1000*1000*fromIntegral sec + fromIntegral nsec / 1000
 
-splitWidth :: Int -> Text -> (Text, Text)
-splitWidth n t = case Text.uncons t of
-  Just (c, t) | wcwidth c <= n -> 
-    let ~(xs,ys) = splitWidth (n - wcwidth c) t
-    in (Text.cons c xs, ys)
-  _ -> ("", t)
-
-rsplitWidth :: Int -> Text -> (Text, Text)
-rsplitWidth n t = case Text.unsnoc t of
-  Just (t, c) | wcwidth c <= n -> 
-    let ~(xs,ys) = rsplitWidth (n - wcwidth c) t
-    in (xs, Text.snoc ys c)
-  _ -> (t, "")
-
-getWordORP :: Cursor -> (Text, Char, Text)
-getWordORP here = (pre, c, suf) where
-  word = getWord here
-  (pre,Just (c, suf)) = Text.uncons <$> splitWidth (orp word) word
-
 draw :: Environment -> State -> [Widget Name]
-draw Env{..} St{..} = case mode of
+draw env@Env{..} st@St{..} = case mode of
   Starting ->
     return emptyWidget
 
@@ -218,7 +227,7 @@ draw Env{..} St{..} = case mode of
         rightEdge = introRightEdges ! quot (numRightEdges * rightPartial) lastFrame
         indent = prefixWidth - leftFull - wcswidth leftEdge
     in
-    return $ drawReticule indent 
+    return $ drawReticule st indent 
       [ str leftEdge
       , str $ replicate numFull '█'
       , str rightEdge
@@ -226,7 +235,7 @@ draw Env{..} St{..} = case mode of
       
   Reading{..} ->
     let (pre, c, suf) = getWordORP here in 
-    return $ drawReticule (prefixWidth - textWidth pre)
+    return $ drawReticule st (prefixWidth - textWidth pre)
       [ withAttr wordPrefix $ txt pre
       , withAttr wordFocus  $ str [c]
       , withAttr wordSuffix $ txt suf
@@ -259,89 +268,45 @@ draw Env{..} St{..} = case mode of
     250wpm                         15073/29465 words                         403.0.1
   -}
   Paused{..} -> 
-    let (cpre, wpre, wfoc, wsuf, csuf) = context reticule here
-        doc = getDocument here
-        pos@Position{..} = getPosition here
-        absSentenceNum = sentenceNum + sum [numSentences doc p | p <- [0..paragraphNum-1]]
-        absNumSentences = Vector.sum $ Vector.length <$> doc
-        absWordNum = wordNum 
-          + sum [numWords doc paragraphNum s | s <- [0..sentenceNum-1]]
-          + sum [numWords doc p s | p <- [0..paragraphNum-1], s <- [0..numSentences doc p - 1]]
-        absNumWords = Vector.sum $ (Vector.sum . fmap Vector.length) <$> doc
-
-        percent :: Int
-        percent = round (100 * fromIntegral absWordNum / fromIntegral absNumWords :: Double)
-
-        (estHours, estMinutes, estSeconds) = toTime absWordNum
-        (totHours, totMinutes, totSeconds) = toTime absNumWords
-
-        toTime :: Int -> (Int,Int,Int)
-        toTime n = (h,m,s) where
-          hms = round $ 60 * fromIntegral n / wpm
-          (hm,s) = hms `quotRem` 60
-          (h,m)  = hm `quotRem` 60
-
-        tshow n | n < 10 = '0' : show n
-                | otherwise = show n
-
-        spos = show pos
-        reticuleWidth = prefixWidth + 1 + suffixWidth
-        rightJustify = reticuleWidth - wcswidth spos
-    in
-    [ drawReticule (prefixWidth - textWidth cpre - textWidth wpre)
+    [ let (cpre, wpre, wfoc, wsuf, csuf) = reticuleContext st
+      in
+      drawReticule st (prefixWidth - textWidth cpre - textWidth wpre)
       [ withAttr contextPrefix $ txt cpre
       , withAttr wordPrefix $ txt wpre
       , withAttr wordFocus $ str [wfoc]
       , withAttr wordSuffix $ txt wsuf
       , withAttr contextSuffix $ txt csuf
       ]
+
     , translateBy (Location (0,3)) $ hBox
       [ str $ show (round wpm :: Int)
       , str "wpm"
       ]
-    , translateBy (Location (rightJustify,3)) $ str spos
-    , padTop (Pad 3) $ hCenter $ str $ case progress of
-      FractionParagraphs -> concat
-        [ show paragraphNum 
-        , "/"
-        , show $ numParagraphs doc
-        , " paragraphs"
-        ]
-      FractionSentences -> concat
-        [ show absSentenceNum
-        , "/"
-        , show $ absNumSentences
-        , " sentences"
-        ]
-      FractionWords -> concat
-        [ show absWordNum
-        , "/"
-        , show $ absNumWords
-        , " words"
-        ]
-      Percentage -> concat [ show percent, "%" ]
-      FractionTime -> concat
-        [ show estHours, ":", tshow estMinutes, ":", tshow estSeconds
-        , "/"
-        , show totHours, ":", tshow totMinutes, ":", tshow totSeconds
-        ]
+
+    , let spos = show $ getPosition here
+          rightJustify = reticuleWidth - wcswidth spos
+      in
+      translateBy (Location (rightJustify,3)) $ str spos
+
+    , padTop (Pad 3) . hCenter . str $ showProgress env st
+
     , if showHelp
         then padTop (Pad 5) $ hBox $ padLeft (Pad 4) <$>
-          [ vBox [ str keys | (_, unzip -> (showKeys -> keys, _)) <- usage ]
-          , vBox [ str helpMsg | (helpMsg, _) <- usage ]
+          [ vBox [ str keys | (_, unzip -> (showKeys -> keys, _)) <- bindingsHelp ]
+          , vBox [ str helpMsg | (helpMsg, _) <- bindingsHelp ]
           ]
         else emptyWidget
     ]
 
   Unpausing{..} -> 
-    let (cpre, wpre, wfoc, wsuf, csuf) = context reticule here
+    let (cpre, wpre, wfoc, wsuf, csuf) = reticuleContext st
         framesRemaining = lastFrame - frameNum
         leftFull = ((prefixWidth - textWidth wpre) * framesRemaining) `quot` lastFrame
         rightFull = ((suffixWidth - textWidth wsuf) * framesRemaining) `quot` lastFrame
         cpre' = snd $ rsplitWidth leftFull cpre
         csuf' = fst $ splitWidth rightFull csuf
     in
-    [ drawReticule (prefixWidth - textWidth cpre' - textWidth wpre)
+    [ drawReticule st (prefixWidth - textWidth cpre' - textWidth wpre)
       [ withAttr contextPrefix . txt $ cpre'
       , withAttr wordPrefix $ txt wpre
       , withAttr wordFocus $ str [wfoc]
@@ -349,9 +314,48 @@ draw Env{..} St{..} = case mode of
       , withAttr contextSuffix . txt $ csuf'
       ]
     ]
-    -- cropLeftBy / cropRightBy
 
-  where Reticule{..} = reticule
+showProgress :: Environment -> State -> String
+showProgress Env{..} St{..} = case progressDisplay of
+    FractionParagraphs -> concat
+      [ show paragraphNum 
+      , "/"
+      , show absNumParagraphs
+      , " paragraphs"
+      ]
+    FractionSentences -> concat
+      [ show absSentenceNum
+      , "/"
+      , show absNumSentences
+      , " sentences"
+      ]
+    FractionWords -> concat
+      [ show absWordNum
+      , "/"
+      , show absNumWords
+      , " words"
+      ]
+    Percentage -> concat [ show percentComplete, "%" ]
+    FractionTime -> concat [ estTime, "/", totTime ]
+  where
+    Position{..} = getPosition here
+
+    absWordNum = wordNum + (wordOffset ! paragraphNum ! sentenceNum)
+    absSentenceNum = sentenceNum + (sentenceOffset ! paragraphNum)
+
+    percentComplete = round (100 * fromIntegral absWordNum / fromIntegral absNumWords :: Double) :: Int
+
+    estTime = showTime absWordNum
+    totTime = showTime absNumWords
+
+    showTime n = concat [ show h , ":", padShow m, ":", padShow s ] where
+      hms :: Int
+      hms = round $ 60 * fromIntegral n / wpm
+      (hm,s) = hms `quotRem` 60
+      (h,m)  = hm `quotRem` 60
+
+    padShow n | n < 10 = '0' : show n
+              | otherwise = show n
 
 showKeys :: [Vty.Key] -> String
 showKeys = intercalate "/" . fmap showKey where
@@ -366,8 +370,8 @@ showKeys = intercalate "/" . fmap showKey where
     Vty.KChar c     -> [c]
     _               -> show k
 
-context :: Reticule -> Cursor -> (Text, Text, Char, Text, Text)
-context Reticule{..} here = (cpre, wpre, wfoc, wsuf, csuf) where
+reticuleContext :: State -> (Text, Text, Char, Text, Text)
+reticuleContext St{..} = (cpre, wpre, wfoc, wsuf, csuf) where
   (wpre, wfoc, wsuf) = getWordORP here
   cpreWidth = prefixWidth - textWidth wpre
   csufWidth = suffixWidth - textWidth wsuf + 1 - wcwidth wfoc
@@ -446,9 +450,12 @@ handleEvent env@Env{..} st@St{ ..} (AppEvent Advance{..}) = case mode of
         mode <- reading env wpm =<< getCurrentTime
         continue St{..}
   _ -> continue st
-handleEvent env st (VtyEvent ev) = case ev of
+handleEvent env st@St{..} (VtyEvent ev) = case ev of
   Vty.EvLostFocus -> continue st { mode=Paused{showHelp=False} }
-  Vty.EvResize cols _rows -> continue st { reticule=makeReticule env cols }
+  Vty.EvResize reticuleWidth _rows -> 
+    let prefixWidth = orp (Text.replicate reticuleWidth "X")
+        suffixWidth = reticuleWidth - 1 - prefixWidth
+    in continue St{..}
   Vty.EvKey (flip Map.lookup bindings -> Just action) [] -> action env st
   _ -> continue st
 handleEvent _env st _ev = continue st
@@ -460,23 +467,19 @@ setTimer Env{..} ms = liftIO . forkIO $ do
 
 startIntro :: MonadIO m => Environment -> State -> Microseconds -> m Mode
 startIntro env@Env{..} St{..} startTime  = do
-  let Reticule{..} = reticule
-      lastFrame = lcm (prefixWidth * numLeftEdges) (suffixWidth * numRightEdges)
+  let lastFrame = lcm (prefixWidth * numLeftEdges) (suffixWidth * numRightEdges)
       framesPerMicrosecond = fromIntegral lastFrame  / fromMaybe 0 introDuration
   timer <- setTimer env (1 / framesPerMicrosecond)
   return Introing { frameNum = 0, .. }
 
 reading :: MonadIO m => Environment -> WPM -> Microseconds -> m Mode
-reading Env{..} wpm lastMove = do
-  timer <- liftIO . forkIO $ do
-    threadDelay $ round (60e6 / wpm)
-    writeBChan events . Advance =<< myThreadId
+reading env wpm lastMove = do
+  timer <- setTimer env (60e6 / wpm)
   return Reading{ .. }
 
 startUnpause :: MonadIO m => Environment -> State -> Microseconds -> m Mode
 startUnpause env@Env{..} St{..} startTime  = do
-  let Reticule{..} = reticule
-      (pre, c, suf) = getWordORP here
+  let (pre, c, suf) = getWordORP here
       lastFrame = lcm (prefixWidth - textWidth pre) (suffixWidth - textWidth suf + 1 - wcwidth c)
       framesPerMicrosecond = fromIntegral lastFrame / fromMaybe 0 unpauseDuration
   timer <- setTimer env (1 / framesPerMicrosecond)
@@ -565,7 +568,7 @@ pauseAndChangeProgress dir _env st@St{..} = continue st
   { mode = case mode of
       Paused _  -> mode
       _         -> Paused False
-  , progress = if dir == Forwards
-      then case progress of { FractionWords -> Percentage ; _ -> succ progress }
-      else case progress of { Percentage -> FractionWords ; _ -> pred progress }
+  , progressDisplay = if dir == Forwards
+      then case progressDisplay of { FractionWords -> Percentage ; _ -> succ progressDisplay }
+      else case progressDisplay of { Percentage -> FractionWords ; _ -> pred progressDisplay }
   }

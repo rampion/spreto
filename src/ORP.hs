@@ -1,6 +1,11 @@
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 module ORP where
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Brick.Widgets.Core (textWidth)
+import Graphics.Text.Width (wcwidth)
+
+import Cursor
 
 -- |
 -- Approximate the "optimal recognition point" (ORP) for a given word,
@@ -41,3 +46,22 @@ orp :: Text -> Int
 -- E/ach w/ord i/s de/livered t/o y/our e/yes i/n t/he pe/rfect po/sition 
 -- In/stead o/f y/ou 
 orp w = (textWidth w + 2) `div` 4
+
+splitWidth :: Int -> Text -> (Text, Text)
+splitWidth n t = case Text.uncons t of
+  Just (c, t) | wcwidth c <= n -> 
+    let ~(xs,ys) = splitWidth (n - wcwidth c) t
+    in (Text.cons c xs, ys)
+  _ -> (Text.empty, t)
+
+rsplitWidth :: Int -> Text -> (Text, Text)
+rsplitWidth n t = case Text.unsnoc t of
+  Just (t, c) | wcwidth c <= n -> 
+    let ~(xs,ys) = rsplitWidth (n - wcwidth c) t
+    in (xs, Text.snoc ys c)
+  _ -> (t, Text.empty)
+
+getWordORP :: Cursor -> (Text, Char, Text)
+getWordORP here = (pre, c, suf) where
+  word = getWord here
+  (pre,Just (c, suf)) = Text.uncons <$> splitWidth (orp word) word
