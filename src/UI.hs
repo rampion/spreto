@@ -185,6 +185,20 @@ getCurrentTime = liftIO $ do
   TimeSpec{..} <- getTime Monotonic
   return $ 1000*1000*fromIntegral sec + fromIntegral nsec / 1000
 
+splitWidth :: Int -> Text -> (Text, Text)
+splitWidth n t = case Text.uncons t of
+  Just (c, t) | wcwidth c <= n -> 
+    let ~(xs,ys) = splitWidth (n - wcwidth c) t
+    in (Text.cons c xs, ys)
+  _ -> ("", t)
+
+rsplitWidth :: Int -> Text -> (Text, Text)
+rsplitWidth n t = case Text.unsnoc t of
+  Just (t, c) | wcwidth c <= n -> 
+    let ~(xs,ys) = rsplitWidth (n - wcwidth c) t
+    in (xs, Text.snoc ys c)
+  _ -> (t, "")
+
 draw :: Environment -> State -> [Widget Name]
 draw Env{..} St{..} = case mode of
   Starting ->
@@ -208,9 +222,9 @@ draw Env{..} St{..} = case mode of
   Reading{..} ->
     let word = getWord here
         n = orp word
-        (pre,Just (c, suf)) = Text.uncons <$> Text.splitAt n word
+        (pre,Just (c, suf)) = Text.uncons <$> splitWidth n word
     in 
-    return $ drawReticule (prefixWidth - n)
+    return $ drawReticule (prefixWidth - textWidth pre)
       [ withAttr wordPrefix $ txt pre
       , withAttr wordFocus  $ str [c]
       , withAttr wordSuffix $ txt suf
@@ -317,31 +331,20 @@ draw Env{..} St{..} = case mode of
         else emptyWidget
     ]
 
-  -- TODO: test with multi-width characters
-  --
-  --  aeioucsz
-  --  áéíóúčšž
-  --  台北1234    (leading characters should be 2 spaces each)
-  --  abcdefgh
-  --  ＱＲＳ12    (fullwidth latin; should be 2 spaces each)
-  --  abcdefgh
-  --  ｱｲｳ12345    (halfwidth kana; should be 1 space each)
-  --  abcdefgh
-  --
-  --  https://denisbider.blogspot.com/2015/09/when-monospace-fonts-arent-unicode.html
-
   Unpausing{..} -> 
     let (cpre, wpre, wfoc, wsuf, csuf) = context reticule here
         framesRemaining = lastFrame - frameNum
         leftFull = ((prefixWidth - textWidth wpre) * framesRemaining) `quot` lastFrame
         rightFull = ((suffixWidth - textWidth wsuf) * framesRemaining) `quot` lastFrame
+        cpre' = snd $ rsplitWidth leftFull cpre
+        csuf' = fst $ splitWidth rightFull csuf
     in
-    [ drawReticule (prefixWidth - leftFull - textWidth wpre)
-      [ withAttr contextPrefix . txt $ Text.takeEnd leftFull cpre
+    [ drawReticule (prefixWidth - textWidth cpre' - textWidth wpre)
+      [ withAttr contextPrefix . txt $ cpre'
       , withAttr wordPrefix $ txt wpre
       , withAttr wordFocus $ str [wfoc]
       , withAttr wordSuffix $ txt wsuf
-      , withAttr contextSuffix . txt $ Text.take rightFull csuf
+      , withAttr contextSuffix . txt $ csuf'
       ]
     ]
     -- cropLeftBy / cropRightBy
@@ -365,20 +368,20 @@ context :: Reticule -> Cursor -> (Text, Text, Char, Text, Text)
 context Reticule{..} here = (cpre, wpre, wfoc, wsuf, csuf) where
   word = getWord here
   n = orp word
-  (wpre,Just (wfoc, wsuf)) = Text.uncons <$> Text.splitAt n word
+  (wpre,Just (wfoc, wsuf)) = Text.uncons <$> splitWidth n word
   cpreWidth = prefixWidth - textWidth wpre
   csufWidth = suffixWidth - textWidth wsuf + 1 - wcwidth wfoc
   ellipsis = "…"
   
   cpre = flip fix ("", move ToPreviousWord here) $ \loop (cpre, moved) -> 
     case (textWidth cpre `compare` cpreWidth, moved) of
-      (GT, _)         -> ellipsis <> Text.takeEnd (cpreWidth - textWidth ellipsis) cpre
+      (GT, _)         -> ellipsis <> snd (rsplitWidth (cpreWidth - textWidth ellipsis) cpre)
       (_, Just here)  -> loop (getWord here <> " " <> cpre, move ToPreviousWord here)
       _               -> cpre
 
   csuf = flip fix ("", move ToNextWord here) $ \loop (csuf, moved) ->
     case (textWidth csuf `compare` csufWidth, moved) of
-      (GT, _)         -> Text.take (csufWidth - textWidth ellipsis) csuf <> ellipsis
+      (GT, _)         -> fst (splitWidth (csufWidth - textWidth ellipsis) csuf) <> ellipsis
       (_, Just here)  -> loop (csuf <> " " <> getWord here, move ToNextWord here)
       _               -> csuf
 
@@ -481,8 +484,8 @@ unpausing Env{..} St{..} frameNum startTime = liftIO $ do
       nextTime = startTime + (fromIntegral frameNum / framesPerMicrosecond)
       w = getWord here
       n = orp w
-      n' = textWidth w - wcwidth (w `Text.index` n) - n
-      lastFrame = lcm (prefixWidth - n) (suffixWidth - n')
+      (pre, Just (c, suf)) = Text.uncons <$> splitWidth n w
+      lastFrame = lcm (prefixWidth - textWidth pre) (suffixWidth - textWidth suf + 1 - wcwidth c)
       framesPerMicrosecond = fromIntegral lastFrame / fromMaybe 0 unpauseDuration
   timer <- forkIO $ do
     currTime <- getCurrentTime
