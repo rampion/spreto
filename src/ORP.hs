@@ -7,6 +7,9 @@ import Graphics.Text.Width (wcwidth)
 
 import Cursor
 
+-- $setup
+-- >>> :set -XOverloadedStrings
+
 -- |
 -- Approximate the "optimal recognition point" (ORP) for a given word,
 -- the character that should be aligned and highlighted when the word is
@@ -47,6 +50,30 @@ orp :: Text -> Int
 -- In/stead o/f y/ou 
 orp w = (textWidth w + 2) `div` 4
 
+-- |
+-- Split text at the n'th column.
+--
+-- >>> putStrLn "|123456|\n|\65345\65346\65347|"
+-- |123456|
+-- |ａｂｃ|
+-- >>> splitWidth 0 "\65345\65346\65347"
+-- ("","\65345\65346\65347")
+-- >>> splitWidth 2 "\65345\65346\65347"
+-- ("\65345","\65346\65347")
+-- >>> splitWidth 4 "\65345\65346\65347"
+-- ("\65345\65346","\65347")
+-- >>> splitWidth 6 "\65345\65346\65347"
+-- ("\65345\65346\65347","")
+--
+-- If the n'th column occurs in the middle of a character, the text is split
+-- right before that character.
+--
+-- >>> splitWidth 1 "\65345\65346\65347"
+-- ("","\65345\65346\65347")
+-- >>> splitWidth 3 "\65345\65346\65347"
+-- ("\65345","\65346\65347")
+-- >>> splitWidth 5 "\65345\65346\65347"
+-- ("\65345\65346","\65347")
 splitWidth :: Int -> Text -> (Text, Text)
 splitWidth n t = case Text.uncons t of
   Just (c, t) | wcwidth c <= n -> 
@@ -54,6 +81,30 @@ splitWidth n t = case Text.uncons t of
     in (Text.cons c xs, ys)
   _ -> (Text.empty, t)
 
+-- |
+-- Split text at the n'th column from the end.
+--
+-- >>> putStrLn "|123456|\n|\65345\65346\65347|"
+-- |123456|
+-- |ａｂｃ|
+-- >>> rsplitWidth 0 "\65345\65346\65347"
+-- ("\65345\65346\65347","")
+-- >>> rsplitWidth 2 "\65345\65346\65347"
+-- ("\65345\65346","\65347")
+-- >>> rsplitWidth 4 "\65345\65346\65347"
+-- ("\65345","\65346\65347")
+-- >>> rsplitWidth 6 "\65345\65346\65347"
+-- ("","\65345\65346\65347")
+--
+-- If the n'th column from the end occurs in the middle of a character, the string is split
+-- right after that character.
+--
+-- >>> rsplitWidth 1 "\65345\65346\65347"
+-- ("\65345\65346\65347","")
+-- >>> rsplitWidth 3 "\65345\65346\65347"
+-- ("\65345\65346","\65347")
+-- >>> rsplitWidth 5 "\65345\65346\65347"
+-- ("\65345","\65346\65347")
 rsplitWidth :: Int -> Text -> (Text, Text)
 rsplitWidth n t = case Text.unsnoc t of
   Just (t, c) | wcwidth c <= n -> 
@@ -61,7 +112,18 @@ rsplitWidth n t = case Text.unsnoc t of
     in (xs, Text.snoc ys c)
   _ -> (t, Text.empty)
 
-getWordORP :: Cursor -> (Text, Char, Text)
-getWordORP here = (pre, c, suf) where
-  word = getWord here
+-- |
+-- Split the given word around the optimal recognition point
+--
+-- >>> splitORP "abcde"
+-- ("a",'b',"cde")
+--
+-- The ORP is calculated using number of columns each character takes up:
+--
+-- >>> splitORP "aabbCDE"
+-- ("aa",'b',"bCDE")
+-- >>> splitORP "aabb\65347\65348\65349"
+-- ("aab",'b',"\65347\65348\65349")
+splitORP :: Text -> (Text, Char, Text)
+splitORP word = (pre, c, suf) where
   (pre,Just (c, suf)) = Text.uncons <$> splitWidth (orp word) word

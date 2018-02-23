@@ -24,14 +24,13 @@ While running, you can use the keyboard to issue various commands to `spreto`:
 - `<Up>` - increase wpm
 - `<Down>` - decrease wpm
 
-Pausing will display the context of the current word, allong with the wpm and
-the position (in time, words, sentences, and paragraphs).
+Pausing will display the context of the current word, allong with the wpm,
+position and progress.
 
     ────────────────────┬───────────────────────────────────────────────────────────
-    …umphantly.  Alice did not quite know what to say to this: so she helped hersel…
+    …iumphantly. Alice did not quite know what to say to this: so she helped hersel…
     ────────────────────┴───────────────────────────────────────────────────────────
-        250wpm          51%           1:00:17/1:57:51          403.0.1
-     403/881 paragraphs       1104/2290 sentences       15073/29465 words
+    250wpm                                51%                                403.0.1
 
 `spreto` also has command line options to allow you to start with a custom
 wpm or at a certain position in the text.

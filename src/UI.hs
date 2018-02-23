@@ -31,46 +31,67 @@ import qualified Graphics.Vty as Vty
 import Graphics.Text.Width (wcswidth, wcwidth)
 import System.Clock (getTime, Clock(Monotonic), TimeSpec(..))
 
-import ORP (orp, getWordORP, splitWidth, rsplitWidth)
+import ORP (orp, splitORP, splitWidth, rsplitWidth)
 import Cursor (Cursor, move, Increment(..), getWord, getPosition, getDocument)
 import Position (Position(..))
 
+-- |
+-- Entry point for the UI. 
+runUI :: Cursor -> Configuration -> IO State
+runUI here Config{..} = do
+  events <- newBChan 10 -- Q: why 10? A: stolen from the example
+
+  vty <- Vty.mkVty Vty.defaultConfig
+  (reticuleWidth, _numRows) <- Vty.displayBounds $ Vty.outputIface vty
+      
+  let doc = getDocument here
+      (wordOffset, totNumWords) = traverse offsets (fmap Vector.length <$> doc) `runState` 0
+      (sentenceOffset, totNumSentences) = offsets (Vector.length <$> doc) `runState` 0
+      totNumParagraphs = Vector.length doc
+
+      prefixWidth = orp (Text.replicate reticuleWidth "X")
+      suffixWidth = reticuleWidth - 1 - prefixWidth
+
+      env = Env
+        { unpauseDuration = uiUnpauseDuration
+        , events          = events
+        , attributes      = uiAttributes
+        , ..
+        }
+
+  startTime <- getCurrentTime
+  let lastFrame = lcm (prefixWidth * numLeftEdges) (suffixWidth * numRightEdges)
+      framesPerMicrosecond = fromIntegral lastFrame  / fromMaybe 0 introDuration
+  timer <- setTimer env (1 / framesPerMicrosecond)
+  let mode = Introing {..}
+
+  -- XXX: takes over the entire display, which is non-optimal
+  --      see https://github.com/jtdaugherty/vty/issues/143
+  Brick.customMain (return vty) (Just events)
+    App { appDraw         = draw env
+        , appChooseCursor = neverShowCursor
+        , appHandleEvent  = handleEvent env
+        , appStartEvent   = cueStart env
+        , appAttrMap      = const (attributes env)
+        }
+    St  { wpm             = uiWPM
+        , direction       = uiReadingDirection
+        , progressDisplay = uiProgressDisplay
+        , ..
+        }
+
+-- | UI settings. Only used for 'runUI'
+data Configuration = Config
+  { uiIntroDuration     :: !(Maybe Microseconds)  -- ^ duration of the intro animation (if any)
+  , uiUnpauseDuration   :: !(Maybe Microseconds)  -- ^ duration of the unpause animation (if any)
+  , uiAttributes        :: !AttrMap               -- ^ widget style preferences
+  , uiWPM               :: !WPM                   -- ^ initial reading rate
+  , uiReadingDirection  :: !Direction             -- ^ initial reading direction
+  , uiProgressDisplay   :: !ProgressDisplay       -- ^ initial progress display preference
+  }
+
 type Microseconds = Double
 type WPM = Double
-type FrameIndex = Int
-type Columns = Int
-
-data Configuration = Config
-  { uiIntroDuration     :: !(Maybe Microseconds)
-  , uiUnpauseDuration   :: !(Maybe Microseconds)
-  , uiAttributes        :: !AttrMap
-  , uiWPM               :: !WPM
-  , uiReadingDirection  :: !Direction
-  , uiProgressDisplay   :: !ProgressDisplay
-  }
-
-data Environment = Env
-  { introDuration     :: !(Maybe Microseconds)
-  , unpauseDuration   :: !(Maybe Microseconds)
-  , attributes        :: !AttrMap
-  , events            :: !(BChan Event)
-  , absNumParagraphs  :: !Int
-  , absNumSentences   :: !Int
-  , absNumWords       :: !Int
-  , sentenceOffset    :: !(Vector Int)
-  , wordOffset        :: !(Vector (Vector Int))
-  }
-
-data State = St
-  { wpm             :: !WPM             -- ^ rate at which to show words
-  , direction       :: !Direction       -- ^ reading forwards or backwards
-  , progressDisplay :: !ProgressDisplay -- ^ how to show progress when paused
-  , here            :: !Cursor          -- ^ current position in the text
-  , reticuleWidth   :: !Columns
-  , prefixWidth     :: !Columns
-  , suffixWidth     :: !Columns
-  , mode            :: !Mode
-  }
 
 data Direction
   = Forwards
@@ -85,8 +106,38 @@ data ProgressDisplay
   | FractionWords
   deriving Enum
 
+type FrameIndex = Int
+type Columns = Int
+
+-- | Settings that are constant through the run of the UI
+data Environment = Env
+  { introDuration     :: !(Maybe Microseconds)    -- ^ duration of intro animation (if any)
+  , unpauseDuration   :: !(Maybe Microseconds)    -- ^ duration of unpause animation (if any)
+  , attributes        :: !AttrMap                 -- ^ widget style preferences
+  , events            :: !(BChan Event)           -- ^ source of timer events for animations/reading
+  , totNumParagraphs  :: !Int                     -- ^ total number of paragraphs in document
+  , totNumSentences   :: !Int                     -- ^ total number of sentences in document
+  , totNumWords       :: !Int                     -- ^ total number of words in document
+  , sentenceOffset    :: !(Vector Int)            -- ^ each paragraph's offset (in sentences) from the start of the document
+  , wordOffset        :: !(Vector (Vector Int))   -- ^ each sentence's offset (in words) from the start of the document
+  }
+
+-- | Settings that may change as the UI runs
+data State = St
+  { wpm             :: !WPM             -- ^ rate at which to show words
+  , direction       :: !Direction       -- ^ which direction we're iterating through the document in
+  , progressDisplay :: !ProgressDisplay -- ^ how to show progress when paused
+  , here            :: !Cursor          -- ^ current position in the text
+  , reticuleWidth   :: !Columns         -- ^ width in columns of the reticule used to display each word
+  , prefixWidth     :: !Columns         -- ^ number of terminal columns before the reticule focus point
+  , suffixWidth     :: !Columns         -- ^ number of terminal columns after the reticule focus point
+  , mode            :: !Mode            -- ^ 
+  }
+
+
+-- | Modes of operation
 data Mode 
-  = Starting
+  = Starting  -- ^ The application has started
   | Introing
     { timer                 :: !ThreadId
     , frameNum              :: !FrameIndex
@@ -95,11 +146,11 @@ data Mode
     , lastFrame             :: !FrameIndex
     }
   | Reading
-    { timer     :: !ThreadId
-    , lastMove  :: !Microseconds
+    { timer                 :: !ThreadId
+    , lastMove              :: !Microseconds
     }
   | Paused
-    { showHelp  :: !Bool
+    { showHelp              :: !Bool
     }
   | Unpausing
     { timer                 :: !ThreadId
@@ -119,45 +170,6 @@ type Binding = (Vty.Key, Command)
 
 offsets :: MonadState Int m => Vector Int -> m (Vector Int)
 offsets = traverse $ \a -> state $ \s -> (s, a+s)
-
-runUI :: Cursor -> Configuration -> IO State
-runUI here Config{..} = do
-  events <- newBChan 10 -- Q: why 10? A: stolen from the example
-
-  vty <- Vty.mkVty Vty.defaultConfig
-  (reticuleWidth, _numRows) <- Vty.displayBounds $ Vty.outputIface vty
-      
-  let doc = getDocument here
-      (wordOffset, absNumWords) = traverse offsets (fmap Vector.length <$> doc) `runState` 0
-      (sentenceOffset, absNumSentences) = offsets (Vector.length <$> doc) `runState` 0
-      absNumParagraphs = Vector.length doc
-
-      prefixWidth = orp (Text.replicate reticuleWidth "X")
-      suffixWidth = reticuleWidth - 1 - prefixWidth
-
-      env = Env
-        { introDuration   = uiIntroDuration
-        , unpauseDuration = uiUnpauseDuration
-        , events          = events
-        , attributes      = uiAttributes
-        , ..
-        }
-
-  -- XXX: takes over the entire display, which is non-optimal
-  --      see https://github.com/jtdaugherty/vty/issues/143
-  Brick.customMain (return vty) (Just events)
-    App { appDraw         = draw env
-        , appChooseCursor = neverShowCursor
-        , appHandleEvent  = handleEvent env
-        , appStartEvent   = cueStart env
-        , appAttrMap      = const (attributes env)
-        }
-    St  { wpm             = uiWPM
-        , direction       = uiReadingDirection
-        , progressDisplay = uiProgressDisplay
-        , mode            = Starting
-        , ..
-        }
 
 drawReticule :: State -> Columns -> [Widget Name] -> Widget Name
 drawReticule St{..} indent xs = vBox
@@ -215,9 +227,6 @@ getCurrentTime = liftIO $ do
 
 draw :: Environment -> State -> [Widget Name]
 draw env@Env{..} st@St{..} = case mode of
-  Starting ->
-    return emptyWidget
-
   Introing{..} ->
     let framesRemaining = lastFrame - frameNum
         (leftFull, leftPartial)   = (prefixWidth * framesRemaining) `quotRem` lastFrame
@@ -234,39 +243,13 @@ draw env@Env{..} st@St{..} = case mode of
       ]
       
   Reading{..} ->
-    let (pre, c, suf) = getWordORP here in 
+    let (pre, c, suf) = splitORP $ getWord here in 
     return $ drawReticule st (prefixWidth - textWidth pre)
       [ withAttr wordPrefix $ txt pre
       , withAttr wordFocus  $ str [c]
       , withAttr wordSuffix $ txt suf
       ] 
 
-  {-
-    ────────────────────┬───────────────────────────────────────────────────────────
-    …umphantly.  Alice did not quite know what to say to this: so she helped hersel…
-    ────────────────────┴───────────────────────────────────────────────────────────
-    250wpm                          1:00:17/1:57:51                          403.0.1
-
-    ────────────────────┬───────────────────────────────────────────────────────────
-    …umphantly.  Alice did not quite know what to say to this: so she helped hersel…
-    ────────────────────┴───────────────────────────────────────────────────────────
-    250wpm                                51%                                403.0.1
-
-    ────────────────────┬───────────────────────────────────────────────────────────
-    …umphantly.  Alice did not quite know what to say to this: so she helped hersel…
-    ────────────────────┴───────────────────────────────────────────────────────────
-    250wpm                        403/881 paragraphs                         403.0.1
-
-    ────────────────────┬───────────────────────────────────────────────────────────
-    …umphantly.  Alice did not quite know what to say to this: so she helped hersel…
-    ────────────────────┴───────────────────────────────────────────────────────────
-    250wpm                        1104/2290 sentences                        403.0.1
-
-    ────────────────────┬───────────────────────────────────────────────────────────
-    …umphantly.  Alice did not quite know what to say to this: so she helped hersel…
-    ────────────────────┴───────────────────────────────────────────────────────────
-    250wpm                         15073/29465 words                         403.0.1
-  -}
   Paused{..} -> 
     [ let (cpre, wpre, wfoc, wsuf, csuf) = reticuleContext st
       in
@@ -320,19 +303,19 @@ showProgress Env{..} St{..} = case progressDisplay of
     FractionParagraphs -> concat
       [ show paragraphNum 
       , "/"
-      , show absNumParagraphs
+      , show totNumParagraphs
       , " paragraphs"
       ]
     FractionSentences -> concat
       [ show absSentenceNum
       , "/"
-      , show absNumSentences
+      , show totNumSentences
       , " sentences"
       ]
     FractionWords -> concat
       [ show absWordNum
       , "/"
-      , show absNumWords
+      , show totNumWords
       , " words"
       ]
     Percentage -> concat [ show percentComplete, "%" ]
@@ -343,10 +326,10 @@ showProgress Env{..} St{..} = case progressDisplay of
     absWordNum = wordNum + (wordOffset ! paragraphNum ! sentenceNum)
     absSentenceNum = sentenceNum + (sentenceOffset ! paragraphNum)
 
-    percentComplete = round (100 * fromIntegral absWordNum / fromIntegral absNumWords :: Double) :: Int
+    percentComplete = round (100 * fromIntegral absWordNum / fromIntegral totNumWords :: Double) :: Int
 
     estTime = showTime absWordNum
-    totTime = showTime absNumWords
+    totTime = showTime totNumWords
 
     showTime n = concat [ show h , ":", padShow m, ":", padShow s ] where
       hms :: Int
@@ -372,7 +355,7 @@ showKeys = intercalate "/" . fmap showKey where
 
 reticuleContext :: State -> (Text, Text, Char, Text, Text)
 reticuleContext St{..} = (cpre, wpre, wfoc, wsuf, csuf) where
-  (wpre, wfoc, wsuf) = getWordORP here
+  (wpre, wfoc, wsuf) = splitORP $ getWord here
   cpreWidth = prefixWidth - textWidth wpre
   csufWidth = suffixWidth - textWidth wsuf + 1 - wcwidth wfoc
   ellipsis = "…"
@@ -404,13 +387,6 @@ wordFocus   = "wordFocus"
 wordSuffix  = "wordSuffix"
 contextPrefix = "contextPrefix"
 contextSuffix = "contextSuffix"
-
-cueStart :: Environment -> State -> EventM Name State 
-cueStart env@Env{..} st@St{..} = do
-  let next | isJust introDuration = startIntro env st
-           | otherwise            = reading env wpm
-  mode <- next =<< getCurrentTime
-  return St{ .. }
 
 handleEvent :: Environment -> State -> BrickEvent Name Event -> EventM Name (Next State)
 handleEvent env@Env{..} st@St{ ..} (AppEvent Advance{..}) = case mode of 
@@ -465,13 +441,6 @@ setTimer Env{..} ms = liftIO . forkIO $ do
   threadDelay $ round ms
   writeBChan events . Advance =<< myThreadId
 
-startIntro :: MonadIO m => Environment -> State -> Microseconds -> m Mode
-startIntro env@Env{..} St{..} startTime  = do
-  let lastFrame = lcm (prefixWidth * numLeftEdges) (suffixWidth * numRightEdges)
-      framesPerMicrosecond = fromIntegral lastFrame  / fromMaybe 0 introDuration
-  timer <- setTimer env (1 / framesPerMicrosecond)
-  return Introing { frameNum = 0, .. }
-
 reading :: MonadIO m => Environment -> WPM -> Microseconds -> m Mode
 reading env wpm lastMove = do
   timer <- setTimer env (60e6 / wpm)
@@ -479,11 +448,15 @@ reading env wpm lastMove = do
 
 startUnpause :: MonadIO m => Environment -> State -> Microseconds -> m Mode
 startUnpause env@Env{..} St{..} startTime  = do
-  let (pre, c, suf) = getWordORP here
+  let (pre, c, suf) = splitORP $ getWord here
       lastFrame = lcm (prefixWidth - textWidth pre) (suffixWidth - textWidth suf + 1 - wcwidth c)
       framesPerMicrosecond = fromIntegral lastFrame / fromMaybe 0 unpauseDuration
   timer <- setTimer env (1 / framesPerMicrosecond)
   return Unpausing { frameNum = 0, .. }
+
+{-------------------------------------------------------------------------------
+ - Commands
+ -------------------------------------------------------------------------------}
 
 togglePause :: Command
 togglePause env@Env{..} st@St{..} = case mode of
