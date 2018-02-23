@@ -199,6 +199,11 @@ rsplitWidth n t = case Text.unsnoc t of
     in (xs, Text.snoc ys c)
   _ -> (t, "")
 
+getWordORP :: Cursor -> (Text, Char, Text)
+getWordORP here = (pre, c, suf) where
+  word = getWord here
+  (pre,Just (c, suf)) = Text.uncons <$> splitWidth (orp word) word
+
 draw :: Environment -> State -> [Widget Name]
 draw Env{..} St{..} = case mode of
   Starting ->
@@ -220,10 +225,7 @@ draw Env{..} St{..} = case mode of
       ]
       
   Reading{..} ->
-    let word = getWord here
-        n = orp word
-        (pre,Just (c, suf)) = Text.uncons <$> splitWidth n word
-    in 
+    let (pre, c, suf) = getWordORP here in 
     return $ drawReticule (prefixWidth - textWidth pre)
       [ withAttr wordPrefix $ txt pre
       , withAttr wordFocus  $ str [c]
@@ -366,9 +368,7 @@ showKeys = intercalate "/" . fmap showKey where
 
 context :: Reticule -> Cursor -> (Text, Text, Char, Text, Text)
 context Reticule{..} here = (cpre, wpre, wfoc, wsuf, csuf) where
-  word = getWord here
-  n = orp word
-  (wpre,Just (wfoc, wsuf)) = Text.uncons <$> splitWidth n word
+  (wpre, wfoc, wsuf) = getWordORP here
   cpreWidth = prefixWidth - textWidth wpre
   csufWidth = suffixWidth - textWidth wsuf + 1 - wcwidth wfoc
   ellipsis = "…"
@@ -473,30 +473,21 @@ reading Env{..} wpm lastMove = do
     writeBChan events . Advance =<< myThreadId
   return Reading{ .. }
 
-unpausing :: MonadIO m => Environment -> State -> FrameIndex -> Microseconds -> m Mode
-unpausing Env{..} St{..} frameNum startTime = liftIO $ do
-  -- threadDelay only guarantees a minimum delay, other factors
-  -- may cause the thread to wait longer.
-  --
-  -- To avoid having the unpause run beyond the desired unpauseDuration, 
-  -- find out when the next frame *should* start, and only wait until then
+startUnpause :: MonadIO m => Environment -> State -> Microseconds -> m Mode
+startUnpause env@Env{..} St{..} startTime  = do
   let Reticule{..} = reticule
-      nextTime = startTime + (fromIntegral frameNum / framesPerMicrosecond)
-      w = getWord here
-      n = orp w
-      (pre, Just (c, suf)) = Text.uncons <$> splitWidth n w
+      (pre, c, suf) = getWordORP here
       lastFrame = lcm (prefixWidth - textWidth pre) (suffixWidth - textWidth suf + 1 - wcwidth c)
       framesPerMicrosecond = fromIntegral lastFrame / fromMaybe 0 unpauseDuration
-  timer <- forkIO $ do
-    currTime <- getCurrentTime
-    threadDelay $ round (nextTime - currTime)
-    writeBChan events . Advance =<< myThreadId
-  return Unpausing{..}
+  timer <- setTimer env (1 / framesPerMicrosecond)
+  return Unpausing { frameNum = 0, .. }
 
 togglePause :: Command
-togglePause env st@St{..} = case mode of
+togglePause env@Env{..} st@St{..} = case mode of
   Paused _ -> do
-    mode <- unpausing env st 0 =<< getCurrentTime
+    let next | isJust unpauseDuration = startUnpause env st
+             | otherwise              = reading env wpm
+    mode <- next =<< getCurrentTime
     continue St{..}
   _ -> continue St{ mode = Paused False, .. }
 
